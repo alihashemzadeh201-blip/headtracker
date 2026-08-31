@@ -1,4 +1,7 @@
-import cv2
+﻿import urllib.request
+import os
+
+code = '''import cv2
 import mediapipe as mp
 import pyautogui
 import numpy as np
@@ -361,3 +364,7 @@ class HeadTrackerApp(ctk.CTk):
 if __name__ == "__main__":
     app = HeadTrackerApp()
     app.mainloop()
+'''
+
+with open(r'd:\Git Projects\HeadTracker\headtracker\head.py', 'w', encoding='utf-8') as f:
+    f.write(code)
