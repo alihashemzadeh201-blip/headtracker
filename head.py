@@ -1,4 +1,4 @@
-﻿import cv2
+import cv2
 import mediapipe as mp
 import pyautogui
 import numpy as np
@@ -12,6 +12,20 @@ pyautogui.PAUSE = 0
 
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+
+# Iris Landmarks
+RIGHT_IRIS = [474, 475, 476, 477]
+LEFT_IRIS = [469, 470, 471, 472]
+
+L_EYE_LEFT = 33
+L_EYE_RIGHT = 133
+L_EYE_TOP = 159
+L_EYE_BOTTOM = 145
+
+R_EYE_LEFT = 362
+R_EYE_RIGHT = 263
+R_EYE_TOP = 386
+R_EYE_BOTTOM = 374
 
 def eye_aspect_ratio(landmarks, eye_indices):
     try:
@@ -27,8 +41,8 @@ class HeadTrackerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         
-        self.title("HeadTracker - All in One")
-        self.geometry("1000x550")
+        self.title("Face & Eye Tracker - All in One")
+        self.geometry("1000x650")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         
@@ -39,6 +53,9 @@ class HeadTrackerApp(ctk.CTk):
         self.center_ny = None
         self.last_click_time = 0
         self.is_blinking = False
+        
+        self.smooth_mouse_x = screen_w / 2
+        self.smooth_mouse_y = screen_h / 2
         
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
@@ -75,8 +92,15 @@ class HeadTrackerApp(ctk.CTk):
         self.scroll = ctk.CTkScrollableFrame(self.settings_frame, fg_color="transparent")
         self.scroll.pack(fill="both", expand=True, padx=10)
         
+        self.track_mode = ctk.StringVar(value="Head Tracking")
+        self.rad_head = ctk.CTkRadioButton(self.scroll, text="Head Tracking (Joystick)", variable=self.track_mode, value="Head Tracking")
+        self.rad_head.pack(anchor="w", pady=5)
+        self.rad_eye = ctk.CTkRadioButton(self.scroll, text="Eye Tracking (Absolute)", variable=self.track_mode, value="Eye Tracking")
+        self.rad_eye.pack(anchor="w", pady=5)
+
         self.sens_var = ctk.DoubleVar(value=0.3)
         self.dz_var = ctk.DoubleVar(value=0.015)
+        self.eye_smooth_var = ctk.DoubleVar(value=0.8)
         self.bc_var = ctk.DoubleVar(value=0.22)
         self.bo_var = ctk.DoubleVar(value=0.26)
         self.cd_var = ctk.DoubleVar(value=0.8)
@@ -84,18 +108,6 @@ class HeadTrackerApp(ctk.CTk):
         self.sw_wink = ctk.BooleanVar(value=True)
         self.sw_mirror = ctk.BooleanVar(value=False)
         self.sw_inv_y = ctk.BooleanVar(value=False)
-
-        self.add_slider("Sensitivity:", self.sens_var, 0.01, 1.0)
-        self.add_slider("Deadzone:", self.dz_var, 0.001, 0.1)
-        self.add_slider("Wink (Close):", self.bc_var, 0.1, 0.4)
-        self.add_slider("Wink (Open):", self.bo_var, 0.15, 0.5)
-        self.add_slider("Cooldown (s):", self.cd_var, 0.1, 3.0)
-
-        ctk.CTkSwitch(self.scroll, text="Enable Wink Click", variable=self.sw_wink).pack(anchor="w", pady=5)
-        ctk.CTkSwitch(self.scroll, text="Mirror Camera", variable=self.sw_mirror).pack(anchor="w", pady=5)
-        ctk.CTkSwitch(self.scroll, text="Invert Y Axis", variable=self.sw_inv_y).pack(anchor="w", pady=5)
-        
-        self.update_frame()
     def add_slider(self, text, variable, vmin, vmax):
         lbl = ctk.CTkLabel(self.scroll, text=text)
         lbl.pack(anchor="w", pady=(10,0))
@@ -116,9 +128,34 @@ class HeadTrackerApp(ctk.CTk):
             self.center_nx = None
             self.center_ny = None
 
+    def get_eye_gaze_ratio(self, landmarks, frame_w, frame_h, side):
+        if side == "left":
+            left_pt = landmarks[L_EYE_LEFT]
+            right_pt = landmarks[L_EYE_RIGHT]
+            top_pt = landmarks[L_EYE_TOP]
+            bot_pt = landmarks[L_EYE_BOTTOM]
+            iris_indices = LEFT_IRIS
+        else:
+            left_pt = landmarks[R_EYE_LEFT]
+            right_pt = landmarks[R_EYE_RIGHT]
+            top_pt = landmarks[R_EYE_TOP]
+            bot_pt = landmarks[R_EYE_BOTTOM]
+            iris_indices = RIGHT_IRIS
+            
+        iris_pts = [landmarks[i] for i in iris_indices]
+        iris_center_x = sum([p.x for p in iris_pts]) / 4
+        iris_center_y = sum([p.y for p in iris_pts]) / 4
+        
+        eye_width = right_pt.x - left_pt.x
+        eye_height = bot_pt.y - top_pt.y
+        
+        if eye_width == 0 or eye_height == 0: return 0.5, 0.5
+        
+        ratio_x = (iris_center_x - left_pt.x) / eye_width
+        ratio_y = (iris_center_y - top_pt.y) / eye_height
+        
     def update_frame(self):
-        if not self.cap.isOpened():
-            return
+        if not self.cap.isOpened(): return
             
         success, frame = self.cap.read()
         if not success:
@@ -127,8 +164,7 @@ class HeadTrackerApp(ctk.CTk):
 
         current_time = time.time()
         
-        if self.sw_mirror.get():
-            frame = cv2.flip(frame, 1)
+        if self.sw_mirror.get(): frame = cv2.flip(frame, 1)
 
         h, w, _ = frame.shape
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -139,32 +175,58 @@ class HeadTrackerApp(ctk.CTk):
                 landmarks = face_landmarks.landmark
                 nx, ny = landmarks[4].x, landmarks[4].y
                 
+                if self.track_mode.get() == "Eye Tracking":
+                    for idx in LEFT_IRIS + RIGHT_IRIS:
+                        cv2.circle(rgb_frame, (int(landmarks[idx].x * w), int(landmarks[idx].y * h)), 1, (255, 255, 0), -1)
+
                 dot_color = (0, 255, 0) if self.is_active else (255, 0, 0)
                 cv2.circle(rgb_frame, (int(nx * w), int(ny * h)), 6, dot_color, -1)
 
                 if self.is_active:
-                    if self.center_nx is None or self.center_ny is None:
-                        self.center_nx, self.center_ny = nx, ny
-
-                    cpx, cpy = int(self.center_nx * w), int(self.center_ny * h)
-                    npx, npy = int(nx * w), int(ny * h)
+                    mode = self.track_mode.get()
                     
-                    cv2.circle(rgb_frame, (cpx, cpy), 4, (0, 100, 255), -1)
-                    cv2.line(rgb_frame, (cpx, cpy), (npx, npy), (0, 100, 255), 1)
+                    if mode == "Head Tracking":
+                        if self.center_nx is None or self.center_ny is None:
+                            self.center_nx, self.center_ny = nx, ny
 
-                    dz = self.dz_var.get()
-                    dx, dy = nx - self.center_nx, ny - self.center_ny
-                    
-                    dx = np.sign(dx) * (abs(dx) - dz) if abs(dx) > dz else 0
-                    dy = np.sign(dy) * (abs(dy) - dz) if abs(dy) > dz else 0
-                    if self.sw_inv_y.get(): dy = -dy
+                        cpx, cpy = int(self.center_nx * w), int(self.center_ny * h)
+                        npx, npy = int(nx * w), int(ny * h)
+                        
+                        cv2.circle(rgb_frame, (cpx, cpy), 4, (0, 100, 255), -1)
+                        cv2.line(rgb_frame, (cpx, cpy), (npx, npy), (0, 100, 255), 1)
 
-                    sens = self.sens_var.get()
-                    move_x, move_y = dx * screen_w * sens, dy * screen_h * sens
-                    if abs(move_x) > 0 or abs(move_y) > 0:
-                        try: pyautogui.moveRel(int(move_x), int(move_y), _pause=False)
+                        dz = self.dz_var.get()
+                        dx, dy = nx - self.center_nx, ny - self.center_ny
+                        
+                        dx = np.sign(dx) * (abs(dx) - dz) if abs(dx) > dz else 0
+                        dy = np.sign(dy) * (abs(dy) - dz) if abs(dy) > dz else 0
+                        if self.sw_inv_y.get(): dy = -dy
+
+                        sens = self.sens_var.get()
+                        move_x, move_y = dx * screen_w * sens, dy * screen_h * sens
+                        if abs(move_x) > 0 or abs(move_y) > 0:
+                            try: pyautogui.moveRel(int(move_x), int(move_y), _pause=False)
+                            except: pass
+                            
+                    elif mode == "Eye Tracking":
+                        lx, ly = self.get_eye_gaze_ratio(landmarks, w, h, "left")
+                        rx, ry = self.get_eye_gaze_ratio(landmarks, w, h, "right")
+                        
+                        avg_x = (lx + rx) / 2
+                        avg_y = (ly + ry) / 2
+                        
+                        target_mouse_x = (1 - avg_x) * screen_w
+                        target_mouse_y = avg_y * screen_h
+                        
+                        if self.sw_inv_y.get():
+                            target_mouse_y = screen_h - target_mouse_y
+                        
+                        smooth_factor = self.eye_smooth_var.get()
+                        self.smooth_mouse_x = (smooth_factor * self.smooth_mouse_x) + ((1 - smooth_factor) * target_mouse_x)
+                        self.smooth_mouse_y = (smooth_factor * self.smooth_mouse_y) + ((1 - smooth_factor) * target_mouse_y)
+                        
+                        try: pyautogui.moveTo(int(self.smooth_mouse_x), int(self.smooth_mouse_y), _pause=False)
                         except: pass
-
                     if self.sw_wink.get():
                         left_ear = eye_aspect_ratio(landmarks, LEFT_EYE)
                         right_ear = eye_aspect_ratio(landmarks, RIGHT_EYE)
@@ -195,7 +257,6 @@ class HeadTrackerApp(ctk.CTk):
             cv2.putText(rgb_frame, "Face not detected", (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
         
         img = Image.fromarray(rgb_frame)
-        
         frame_w = self.cam_frame.winfo_width()
         frame_h = self.cam_frame.winfo_height()
         
@@ -221,3 +282,28 @@ class HeadTrackerApp(ctk.CTk):
 if __name__ == "__main__":
     app = HeadTrackerApp()
     app.mainloop()
+
+
+        ratio_x = np.clip(ratio_x, 0.2, 0.8)
+        ratio_y = np.clip(ratio_y, 0.2, 0.8)
+        
+        mapped_x = (ratio_x - 0.2) / 0.6
+        mapped_y = (ratio_y - 0.2) / 0.6
+        
+        return mapped_x, mapped_y
+
+
+        self.add_slider("Head Sensitivity:", self.sens_var, 0.01, 1.0)
+        self.add_slider("Head Deadzone:", self.dz_var, 0.001, 0.1)
+        self.add_slider("Eye Smoothing:", self.eye_smooth_var, 0.1, 0.99)
+        self.add_slider("Wink (Close):", self.bc_var, 0.1, 0.4)
+        self.add_slider("Wink (Open):", self.bo_var, 0.15, 0.5)
+        self.add_slider("Cooldown (s):", self.cd_var, 0.1, 3.0)
+
+        ctk.CTkSwitch(self.scroll, text="Enable Wink Click", variable=self.sw_wink).pack(anchor="w", pady=5)
+        ctk.CTkSwitch(self.scroll, text="Mirror Camera", variable=self.sw_mirror).pack(anchor="w", pady=5)
+        ctk.CTkSwitch(self.scroll, text="Invert Y Axis", variable=self.sw_inv_y).pack(anchor="w", pady=5)
+        
+        self.update_frame()
+
+﻿
