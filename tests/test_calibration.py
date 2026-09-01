@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from headtracker.calibration import (
-    PLANE_UNITS_PER_PIXEL,
+    FORMAT_VERSION,
     MIN_SAMPLES_PER_POINT,
     CalibrationModel,
     CalibrationSession,
@@ -311,32 +311,53 @@ def test_design_matrix_shapes():
         design_matrix(np.zeros((5, 3)), 1)
 
 
-def test_the_uncalibrated_default_puts_the_plane_origin_at_screen_centre():
+def test_the_uncalibrated_default_puts_a_straight_gaze_at_screen_centre():
     """The fallback's one assumption: the camera faces the user square on.
 
-    It maps the screen-plane origin -- where the optical axis meets the screen
-    -- to the middle of the monitor, at a gain derived from the face model's
-    physical scale rather than from a guessed angle range.
+    It maps a zero gaze to the middle of the monitor at a gain roughly right
+    for a 24" panel seen from arm's length.  The gain is only a starting
+    point -- :meth:`CalibrationModel.fit` measures the real one.
     """
     model = CalibrationModel.default(SCREEN)
     assert model.predict_one(0.0, 0.0) == pytest.approx((SCREEN[0] / 2.0, SCREEN[1] / 2.0))
 
-    right, _ = model.predict_one(PLANE_UNITS_PER_PIXEL, 0.0)
-    _, down = model.predict_one(0.0, PLANE_UNITS_PER_PIXEL)
-    assert right == pytest.approx(SCREEN[0] / 2.0 + 1.0)
-    assert down == pytest.approx(SCREEN[1] / 2.0 + 1.0)
+    right, _ = model.predict_one(24.0, 0.0)
+    _, down = model.predict_one(0.0, 17.0)
+    assert right > SCREEN[0] * 0.9
+    assert down > SCREEN[1] * 0.9
+
+
+def test_a_calibration_from_an_older_format_is_refused(tmp_path):
+    """A file this build cannot interpret must not be quietly used.
+
+    An intermediate release fitted screen-plane points instead of gaze angles.
+    The two differ by three orders of magnitude, so reading one as the other
+    produced pixel coordinates in the tens of thousands, which the controller
+    clamped -- the cursor sat pinned in a screen corner and nothing said why.
+    """
+    model = CalibrationModel.default(SCREEN)
+    model.fit(np.array([[0.0, 0.0], [10.0, 0.0], [0.0, 5.0], [-8.0, 3.0]]),
+              np.array([[960.0, 540.0], [1400.0, 540.0], [960.0, 800.0], [600.0, 700.0]]),
+              screen=SCREEN)
+    path = tmp_path / "calibration.json"
+    model.save(path)
+
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["version"] == FORMAT_VERSION
+
+    stored["version"] = FORMAT_VERSION - 1
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    assert CalibrationModel.load(path) is None
 
 
 def test_no_distance_factor_survives_in_the_mapping():
-    """Distance is handled by the screen-plane projection, not by a fitted term.
+    """Distance is handled by the controller's analytic shift, not fitted here.
 
     Both ``distance_factor`` and ``reference_distance`` existed to widen the
-    response when the user leaned back.  The ray/plane intersection does that
-    from the geometry, so keeping either would scale the same thing twice.
+    response when the user leaned back.  The ray/plane geometry does that
+    exactly, so keeping either would scale the same thing twice.
     """
     model = CalibrationModel.default(SCREEN)
     assert not hasattr(model, "distance_factor")
     assert not hasattr(model, "reference_distance")
-    assert "reference_distance" not in json.loads(
-        json.dumps(model.to_dict())  # pylint: disable=no-member
-    )
+    assert "reference_distance" not in json.loads(json.dumps(model.to_dict()))

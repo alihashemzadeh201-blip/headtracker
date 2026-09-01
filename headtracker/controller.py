@@ -8,6 +8,7 @@ cursor is steady when the user is still yet still follows a quick glance.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -121,14 +122,11 @@ class GazeCursorController:
 
     # -- main path ----------------------------------------------------------
     def gaze_to_screen(self, sample: GazeSample) -> Point:
-        """Project a gaze sample through the calibration, before smoothing.
-
-        No distance term is applied here: the screen-plane projection in
-        :mod:`headtracker.geometry` already scales the gaze by the head's
-        distance from the screen, so leaning back is handled analytically rather
-        than by a fitted correction factor.
-        """
-        raw_x, raw_y = self.model.predict_one(sample.screen_x, sample.screen_y)
+        """Project a gaze sample through the calibration, before smoothing."""
+        raw_x, raw_y = self.model.predict_one(sample.yaw, sample.pitch)
+        shift_x, shift_y = self._head_shift(sample)
+        raw_x += shift_x
+        raw_y += shift_y
 
         gain = self.settings.gain
         reference = self.model.reference
@@ -138,6 +136,85 @@ class GazeCursorController:
             raw_y = centre_y + (raw_y - centre_y) * gain
 
         return self.model.clamp_to_screen((raw_x, raw_y))
+
+    def _head_shift(self, sample: GazeSample) -> Point:
+        """How far the look-at point moved because the *head* moved, in pixels.
+
+        The calibration maps a gaze angle to a pixel, which is only true for
+        the head position the user calibrated from.  Slide sideways and the
+        same angle now lands somewhere else; lean back and the same angle
+        sweeps further, because the lever arm from eye to screen is longer.
+
+        Both follow from intersecting the gaze ray with the screen plane.  With
+        the eye at ``(ex, ey, ez)`` the hit point is ``ex + ez*tan(yaw)``, so
+        against the calibration pose ``(ex0, ey0, ez0)`` it moves by
+
+            (ex - ex0) + (ez - ez0) * tan(yaw)
+
+        Measuring the displacement from the calibration pose rather than from
+        the origin is what makes this safe.  The translation comes from solving
+        the pose against a canonical face model that is not the user's face, so
+        it carries an unknown offset -- but that offset is the same at
+        calibration time and at run time, and subtracting cancels it.  Only the
+        *change* survives, which is the part that actually matters.
+
+        This replaced an earlier version that fitted the calibration directly on
+        screen-plane coordinates.  That was mathematically tidier and measurably
+        worse in use: it made the whole mapping depend on the absolute accuracy
+        of the pose solve, which the test rig cannot check because it generates
+        faces from the same model the solver uses.
+        """
+        reference = self.model.reference_eye
+        if reference is None or not sample.head_translation:
+            return 0.0, 0.0
+
+        # The solve's translation, not the eye position.  The eye also swings
+        # sideways when the head turns, but the gaze angle already reports that
+        # -- adding it again double-counts.  Measured at 12 deg of head yaw,
+        # compensating the eye position made the cursor 14 px *worse*, while
+        # compensating the translation alone is what fixes sliding and leaning.
+        ex, ey, ez = sample.head_translation
+        ex0, ey0, ez0 = reference
+        if ez <= 0 or ez0 <= 0:
+            return 0.0, 0.0
+
+        yaw = math.radians(sample.yaw)
+        pitch = math.radians(sample.pitch)
+        shift_x = (ex - ex0) + (ez - ez0) * math.tan(yaw)
+        shift_y = (ey - ey0) + (ez - ez0) * math.tan(pitch)
+
+        return (
+            shift_x * self._pixels_per_unit(sample.yaw, sample.pitch, axis=0, depth=ez),
+            shift_y * self._pixels_per_unit(sample.yaw, sample.pitch, axis=1, depth=ez),
+        )
+
+    def _pixels_per_unit(
+        self, yaw: float, pitch: float, axis: int, depth: float
+    ) -> float:
+        """Screen pixels per face-model unit, at this gaze direction.
+
+        The shift above is in model units and the cursor needs pixels.  Rather
+        than assume a scale, read it off the calibration: moving the gaze by a
+        small angle moves the hit point by ``ez * sec^2(angle)`` model units and
+        the cursor by whatever the fitted mapping says, so the ratio of the two
+        is the local scale.  That keeps the correction consistent with the
+        calibration however the camera is mounted.
+        """
+        step = 0.25
+        if axis == 0:
+            before = self.model.predict_one(yaw - step, pitch)[0]
+            after = self.model.predict_one(yaw + step, pitch)[0]
+            angle = math.radians(yaw)
+        else:
+            before = self.model.predict_one(yaw, pitch - step)[1]
+            after = self.model.predict_one(yaw, pitch + step)[1]
+            angle = math.radians(pitch)
+
+        pixels_per_degree = (after - before) / (2.0 * step)
+        units_per_degree = depth * (1.0 / math.cos(angle)) ** 2 * math.pi / 180.0
+        if abs(units_per_degree) < 1e-9:
+            return 0.0
+        return pixels_per_degree / units_per_degree
 
     def update(self, sample: GazeSample, timestamp: float) -> Optional[Point]:
         """Advance one frame.  Returns the new cursor position, or ``None``."""

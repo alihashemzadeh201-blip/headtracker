@@ -10,7 +10,6 @@ import pytest
 
 from headtracker.filters import OneEuroFilter
 from headtracker.geometry import (
-    MAX_REPROJECTION_ERROR_PX,
     MODEL_POINTS,
     PNP_IMAGE_POINTS,
     GazeEstimator,
@@ -326,6 +325,14 @@ def test_a_real_face_survives_heavy_landmark_noise():
 
 
 def test_reprojection_error_separates_a_real_pose_from_a_fabricated_one():
+    """The error has to distinguish a fit from a fabrication, by a wide margin.
+
+    It is used to choose between solvers, and as a last-resort bound.  The
+    bound is generous on purpose -- 60 px -- because a real face does not match
+    the canonical model and reprojects imperfectly even when the pose is right.
+    A 15 px mismatch in the pose landmarks alone measures 13.7 px, so a tight
+    bound tuned on synthetic faces would reject real ones.
+    """
     camera = default_camera_matrix(WIDTH, HEIGHT, FOV)
     points = make_face(head_yaw=10.0, eye_yaw=8.0, width=WIDTH, height=HEIGHT).points
     face_points = np.array([points[i] for i in PNP_IMAGE_POINTS], dtype=np.float64)
@@ -336,14 +343,31 @@ def test_reprojection_error_separates_a_real_pose_from_a_fabricated_one():
     )
     assert ok
     good = reprojection_error(rvec, tvec, face_points, camera, distortion)
-    assert good < MAX_REPROJECTION_ERROR_PX
 
-    # The same landmarks explained by a rotation that is not the face's.
-    # Measured: 0.0 px for the real pose against 59.9 px for this one, either
-    # side of a 12 px threshold.
     wrong, _ = cv2.Rodrigues(np.array([1.7, -1.2, 0.9]))
     bad = reprojection_error(wrong, tvec, face_points, camera, distortion)
-    assert bad > MAX_REPROJECTION_ERROR_PX
+
+    assert good < 1.0, f"a clean synthetic face should fit to 0.0 px, got {good:.1f}"
+    assert bad > good * 20, f"fabricated pose ({bad:.1f}) not separated from real ({good:.1f})"
+
+
+def test_a_face_that_does_not_match_the_model_is_still_accepted():
+    """The guard must not depend on the face matching the canonical model.
+
+    MediaPipe's mesh is one particular skull.  Perturbing the six pose
+    landmarks by 15 px -- far less than the difference between two real
+    people -- pushes the reprojection error past 13 px.  The earlier bound
+    rejected those frames outright, which on a real camera meant rejecting all
+    of them and freezing the cursor.
+    """
+    camera = default_camera_matrix(WIDTH, HEIGHT, FOV)
+    points = make_face(head_yaw=10.0, eye_yaw=8.0, width=WIDTH, height=HEIGHT).points
+    rng = np.random.default_rng(0)
+    points[list(PNP_IMAGE_POINTS)] += rng.normal(0.0, 15.0, size=(6, 2))
+
+    solved = solve_head_rotation(points, camera)
+    assert solved is not None, "a real face with an ordinary skull was rejected"
+    assert solved[1][2] > 0
 
 
 # --------------------------------------------------------------------------

@@ -79,17 +79,17 @@ def probe_pixels(columns: int, rows: int) -> np.ndarray:
 
 
 def measure_at(estimator, pixels: np.ndarray, noise_px: float = 0.0) -> np.ndarray:
-    """The screen-plane points the estimator actually reports when aimed at pixels.
+    """The gaze angles the estimator actually reports when aimed at pixels.
 
     Evaluation must go through the estimator, because the running app feeds the
-    calibration *measured* points.  Scoring it against the ideal ones instead
+    calibration *measured* angles.  Scoring it against the ideal ones instead
     would charge the model for the estimator's own (calibrated-away) bias.
     """
     required = pixel_to_gaze(pixels[:, 0], pixels[:, 1])
     observed = []
     for index, row in enumerate(required):
         sample = measure(estimator, row[0], row[1], noise_px=noise_px, seed=int(index))
-        observed.append((sample.screen_x, sample.screen_y))
+        observed.append((sample.yaw, sample.pitch))
     return np.array(observed, dtype=np.float64)
 
 
@@ -148,7 +148,7 @@ def run_calibration(estimator, columns=4, rows=4, noise_px=0.0) -> CalibrationMo
                 estimator, required[0], required[1], noise_px=noise_px, seed=guard
             )
             if sample.valid:
-                session.add_sample(sample.screen_x, sample.screen_y)
+                session.add_sample(sample.yaw, sample.pitch, sample.head_translation)
         session.update(clock)
 
     assert session.finished, "calibration never completed"
@@ -159,7 +159,7 @@ def run_calibration(estimator, columns=4, rows=4, noise_px=0.0) -> CalibrationMo
 # Calibration accuracy through the real measurement chain
 # --------------------------------------------------------------------------
 def test_calibration_absorbs_the_measurement_bias(estimator):
-    """The iris estimate is biased; calibrating on measured points must hide it.
+    """The iris estimate is biased; calibrating on measured angles must hide it.
 
     The synthetic rig is exact, so any end-to-end error here comes from the
     estimator's bias and from the degree-2 fit -- nothing else.

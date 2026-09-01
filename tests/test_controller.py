@@ -1,6 +1,8 @@
-"""Cursor control: absolute positioning, distance compensation, tracking loss."""
+"""Cursor control: absolute positioning, head compensation, tracking loss."""
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import pytest
@@ -13,8 +15,14 @@ from headtracker.mouse import AbsoluteMouse, NullBackend
 SCREEN = (1920.0, 1080.0)
 
 
+#: The eye position the calibration was taken from.  Head compensation is a
+#: displacement from here, so it has to be set for those tests to exercise
+#: anything.
+REFERENCE_EYE = (0.0, 0.0, 4000.0)
+
+
 def make_model() -> CalibrationModel:
-    """A simple linear map from screen-plane units to pixels."""
+    """A simple linear map: 40 deg of yaw spans the screen width."""
     model = CalibrationModel.default(SCREEN)
     model.coefficients = np.array(
         [
@@ -24,6 +32,7 @@ def make_model() -> CalibrationModel:
         dtype=np.float64,
     ).T
     model.reference = (0.0, 0.0)
+    model.reference_eye = REFERENCE_EYE
     return model
 
 
@@ -34,10 +43,18 @@ def make_controller(**settings) -> tuple:
     return controller, backend
 
 
-def sample(yaw: float, pitch: float, valid: bool = True, screen_dx: float = 0.0) -> GazeSample:
-    """The controller works in screen-plane units, so yaw/pitch double as those."""
+def sample(yaw: float, pitch: float, valid: bool = True, head_shift=None) -> GazeSample:
+    """A gaze sample, optionally with the head displaced from the calibration pose.
+
+    ``head_shift`` is ``(dx, dy, dz)`` in face-model units, applied to
+    ``REFERENCE_EYE``.  It moves the pose *translation*, which is what the
+    controller compensates; a turned head is already covered by the angle.
+    """
+    translation = REFERENCE_EYE
+    if head_shift is not None:
+        translation = tuple(a + b for a, b in zip(REFERENCE_EYE, head_shift))
     return GazeSample(
-        yaw=yaw, pitch=pitch, screen_x=yaw + screen_dx, screen_y=pitch, valid=valid,
+        yaw=yaw, pitch=pitch, head_translation=translation, valid=valid,
         reason="" if valid else "lost",
     )
 
@@ -121,33 +138,35 @@ def test_gain_scales_the_offset_from_the_calibration_centre():
     assert doubled_offset == pytest.approx(2.0 * plain_offset, abs=2.0)
 
 
-def test_the_controller_applies_no_distance_term():
-    """Distance is compensated upstream, in the geometry, not by a fitted factor.
+def test_a_head_at_the_calibration_pose_gets_no_correction():
+    """The property that makes the compensation safe to ship.
 
-    The gaze ray is intersected with the screen plane before it reaches this
-    layer, so the sample it receives already encodes how far the head is from
-    the screen.  Scaling it again here would double-count.
+    The eye position is recovered by solving against a canonical face model, so
+    it carries an unknown offset.  Measuring the shift from the calibration
+    pose cancels that offset exactly -- which is the whole reason the
+    correction is a difference and not an absolute position.
     """
     controller, backend = make_controller()
+    model = make_model()
+    model.reference_eye = None
+    controller.set_model(model)
     for index in range(60):
         controller.update(sample(8.0, 0.0), index / 30.0)
-    settled = backend.position()[0]
+    without = backend.position()[0]
 
-    moved = sample(8.0, 0.0)
-    moved.distance = 5200.0
-    for index in range(60, 120):
-        controller.update(moved, index / 30.0)
+    controller.set_model(make_model())
+    for index in range(60, 180):
+        controller.update(sample(8.0, 0.0), index / 30.0)
 
-    assert backend.position()[0] == pytest.approx(settled, abs=2.0)
+    assert backend.position()[0] == pytest.approx(without, abs=1.0)
 
 
 def test_a_shifted_head_moves_the_cursor_with_it():
     """The compensation the user asked for: a head that slides sideways while
     the gaze direction stays put must drag the cursor along.
 
-    ``screen_x`` already carries the head's lateral position, so a shift in it
-    has to reach the screen.  This is the behaviour an angle-only mapping
-    cannot express -- the angle is unchanged, so the angle says "stay put".
+    The angle is unchanged, so the calibration alone says "stay put".  Only the
+    eye's displacement knows the look-at point has moved.
     """
     controller, backend = make_controller()
     for index in range(60):
@@ -155,12 +174,32 @@ def test_a_shifted_head_moves_the_cursor_with_it():
     before = backend.position()[0]
 
     for index in range(60, 180):
-        controller.update(sample(8.0, 0.0, screen_dx=10.0), index / 30.0)
+        controller.update(sample(8.0, 0.0, head_shift=(100.0, 0.0, 0.0)), index / 30.0)
     after = backend.position()[0]
 
-    # The linear test model maps one screen-plane unit to SCREEN[0]/40 pixels.
-    expected = 10.0 * SCREEN[0] / 40.0
-    assert (after - before) == pytest.approx(expected, rel=0.02)
+    # The test model maps 40 deg to the screen width, so at 8 deg the local
+    # scale is SCREEN[0]/40 pixels per degree-equivalent of shift.
+    expected = 100.0 * SCREEN[0] / 40.0 / REFERENCE_EYE[2] * (180.0 / math.pi)
+    assert (after - before) == pytest.approx(expected, rel=0.05)
+
+
+def test_leaning_back_widens_the_response():
+    """Further from the screen, the same angle sweeps further -- analytically.
+
+    This is what the removed ``compensate_distance`` factor approximated with a
+    fitted correction.
+    """
+    controller, backend = make_controller()
+    for index in range(60):
+        controller.update(sample(8.0, 0.0), index / 30.0)
+    near = backend.position()[0]
+
+    for index in range(60, 180):
+        controller.update(sample(8.0, 0.0, head_shift=(0.0, 0.0, 500.0)), index / 30.0)
+    far = backend.position()[0]
+
+    centre = SCREEN[0] / 2.0
+    assert (far - centre) > (near - centre) * 1.05
 
 
 # --------------------------------------------------------------------------

@@ -38,27 +38,11 @@ measures it rather than just asserting it exists.
 
 ## How it works
 
-### The signal is the gaze ray, not an angle
+### The signal is the gaze angle, plus where the head is
 
-The estimator recovers two things from each frame: **where the eye is** and
-**which way it points**. It then intersects that ray with the screen plane and
-reports the hit point (`geometry.project_to_screen_plane`).
-
-This is the single most important design decision here, and it is what makes
-head movement a non-event. Writing the eye at `E` and the gaze direction as `d`,
-the point being looked at is
-
-```
-s = -E.z / d.z
-hit = E + s * d          →   hit.x ≈ E.x + E.z * tan(yaw)
-```
-
-so the head's lateral position, its distance from the screen and its rotation
-all enter the arithmetic instead of being guessed at afterwards. Lean left and
-the origin moves left; lean back and the lever arm `E.z` lengthens, so the same
-angle sweeps further. Both used to need a fitted correction factor — the old
-`compensate_distance` setting — and both now fall out of the geometry. That
-setting, and `distance_factor` with it, are gone.
+The estimator recovers two things from each frame: **which way the eyes point**
+and **where the head is**. The calibration maps the angle to a pixel; the head
+position supplies a correction to it.
 
 The iris measurement is the primary signal and the head pose the fallback. This
 is not a guess: multiplying the perspective numerator and denominator by
@@ -66,6 +50,46 @@ is not a guess: multiplying the perspective numerator and denominator by
 offset already encodes the *total* gaze direction independent of head rotation.
 Adding the head angle on top would count it twice, which an earlier version of
 this code did.
+
+### Head movement
+
+Intersecting the gaze ray with the screen plane gives the point being looked at.
+With the eye at `E` and the gaze direction `d`:
+
+```
+hit.x = E.x + E.z * tan(yaw)
+```
+
+so sliding sideways and leaning back both move the look-at point, and a
+calibration fitted on angles alone cannot know about either. The controller
+therefore adds the displacement analytically, measured against the pose recorded
+at calibration time.
+
+Two details decide whether this works or makes things worse, and both were
+settled by measurement rather than by reasoning:
+
+**It is a displacement, not a position.** The eye position comes from solving
+against MediaPipe's canonical face model, which is not your face, so it carries
+an unknown offset. Subtracting the calibration pose cancels that offset exactly.
+Using the absolute position instead ties the whole mapping to how well the solve
+works — which is what a previous revision did, and it was measurably worse.
+
+**It compensates the translation, not the eye.** Turning your head swings the
+eye sideways too, but the gaze angle already reports that. Adding it as well
+double-counts: measured at 12° of head yaw it made the cursor 14 px *worse*,
+while compensating the solve's translation alone leaves rotation neutral.
+
+| the head… | with compensation | without |
+|---|---|---|
+| stays put | 2.8 px | 3.0 px |
+| slides 30 px either way | 2.5–3.3 px | 38–44 px |
+| moves from 600 mm to 500 / 750 mm | 9.2 / 9.6 px | 61 / 56 px |
+| yaws ±12° | 9.5–14.6 px | 9.4–14.8 px |
+| yaws, slides and leans at once | 15.5 px | 24.4 px |
+| **summed over all of the above** | **69.9 px** | **252.3 px** |
+
+The old `compensate_distance` setting and `distance_factor` approximated the
+distance row with a fitted correction. Both are gone.
 
 ### The pose solver is chosen, not defaulted
 
@@ -85,9 +109,13 @@ Two guards reject the solutions the solvers are willing to invent:
   reprojection error is *exactly zero* — every model point projects onto the
   pixel the landmarks already share. Nothing about the fit detects it; only the
   physical size of the face does.
-- **Reprojection.** A pose that really fits puts its model points within a
-  couple of pixels of the landmarks. Measured: 0.0 px for a real face, 59.9 px
-  for a fabricated rotation, against a 12 px threshold.
+- **Reprojection.** Used mainly to *choose* between solvers, since on a
+  near-coplanar point set they genuinely disagree. The absolute bound is a
+  generous 60 px, and that generosity is deliberate: it began at 12 px, tuned on
+  synthetic faces whose landmarks come from the same model the solver fits,
+  where a good pose reprojects to 0.0 px. A real face is a different skull —
+  perturbing the pose landmarks by 15 px already measures 13.7 px — so the tight
+  bound would have rejected every frame a real camera produced.
 
 ### The eye centre is averaged, not assumed
 
@@ -107,15 +135,24 @@ pixel has not changed.
 
 ### Calibration
 
-Calibration fits a degree-2 polynomial from screen-plane points to screen
-pixels. It removes what cannot be computed: where the camera is mounted, how the
-lens bends, how the screen is tilted, and the systematic bias of the iris model
-itself.
+Calibration fits a degree-2 polynomial from gaze angles to screen pixels. It
+removes what cannot be computed: where the camera is mounted, how the lens
+bends, how the screen is tilted, and the systematic bias of the iris model
+itself. It records the head translation alongside, which is what the correction
+above measures itself against.
 
-Because the projection already linearises the geometry, the fit is close to
-affine and converges on a 4×4 grid. The solver itself is verifiable: a target
-that is exactly a degree-2 polynomial comes back out to 0.15 px, the residue of
-the ridge penalty rather than of the fit.
+Saved calibrations carry a format version, and a file this build does not
+understand is refused rather than used. That is not bookkeeping: an intermediate
+revision fitted screen-plane points instead of angles, and reading one as the
+other produced pixel coordinates in the tens of thousands, which the controller
+clamped — the cursor sat pinned in a screen corner with nothing to explain why.
+A calibration from *before* that revision is still in angle space, so it loads
+and works; it simply carries no `reference_eye` and therefore gets no head
+compensation until the next calibration.
+
+The solver itself is verifiable: a target that is exactly a degree-2 polynomial
+comes back out to 0.15 px, the residue of the ridge penalty rather than of the
+fit.
 
 ### Smoothing
 
@@ -144,8 +181,6 @@ and 30 fps, with 1 px of per-landmark jitter unless stated. Reproduce them with
 
 ### Cursor jitter and offset
 
-Aimed at one pixel for 240 frames:
-
 One protocol throughout: 300 warmup frames, then 150 measured while aiming at
 one pixel, then a 943 px glance. Lag is the time to reach 90% of that glance.
 
@@ -161,9 +196,8 @@ The shipped defaults are the point where the cursor is steady while you read
 and still keeps up with a glance. Both lower settings are one line in
 `settings.json` if you would rather have stillness than speed.
 
-"Offset" here is against the pixel being aimed at, and it is small in every row
-because it is dominated by the calibration, not the filter. Against the *true*
-target after a full calibration the cursor sits 3.5 px off.
+"Offset" is against the pixel being aimed at. It is dominated by the
+calibration, not the filter, which is why it barely moves between rows.
 
 ### Single-frame gaze noise
 
@@ -183,36 +217,23 @@ Clean signal, 48 held-out probes on a 1920×1080 screen:
 
 | grid | mean | worst |
 |---|---|---|
-| 3×3 | 4.18 px | 10.15 px |
-| 4×4 | 3.90 px | 8.87 px |
-| 5×4 | 3.68 px | 7.86 px |
+| 3×3 | 6.89 px | 12.64 px |
+| 4×4 | 5.72 px | 10.80 px |
+| 5×4 | 5.18 px | 9.81 px |
 
-Calibration is not the limiting factor — the landmark noise above is roughly
-eight times larger. Going past degree 2 fits the noise instead of the mapping.
-
-Fitting in screen-plane coordinates rather than raw angles costs about 1.9 px
-here (3.88 against 2.02 px). That is a fair trade: it is 5% of the noise floor,
-and it is what buys the head compensation below.
+Calibration is not the limiting factor — the landmark noise above is of the
+same size, and the cursor's own jitter is larger than either. Going past degree
+2 fits the noise instead of the mapping.
 
 ### Head movement
 
-Calibrate once, then move. Measured as the drift of the recovered screen point
-against the true one, relative to the calibration pose:
+See the table under *Head movement* above. Summed over every pose tested, the
+correction takes the error from 252.3 px to 69.9 px.
 
-| the head… | drift |
-|---|---|
-| slides 40 px left or right in frame | **< 3 px** |
-| moves from 450 mm to 850 mm | **< 4 px** |
-| yaws ±18° | up to 40 px |
-| pitches ±12° | up to 22 px |
-
-Translation and distance are compensated essentially exactly, because they enter
-the projection analytically. Rotation is only partly compensated: the iris
-offset is read along axes that turn with the head, so a rotated head slightly
-under-reports the camera-frame angle. The residual is bounded, smooth and
-centred on the calibration pose — at the cursor, every pose tested lands within
-60 px of target — and removing it would mean de-rotating the iris measurement by
-the head pose, which is worth doing only against a real camera.
+The residual is concentrated in head rotation, which is not compensated at all:
+the gaze angle already accounts for a turned head, and adding the eye's orbital
+displacement on top was measured to make it worse. What remains there is the
+iris model reading the offset along axes that turn with the head.
 
 ---
 
@@ -259,11 +280,11 @@ headtracker/
   mouse.py                 absolute positioning: Win32 / Xlib / Quartz
   settings.py              persisted configuration
   tracking.py              MediaPipe Tasks wrapper
-tests/                     179 tests
+tests/                     184 tests
 ```
 
 ```bash
-pytest          # 179 passed
+pytest          # 184 passed
 pylint headtracker tests   # 10.00/10
 ```
 
@@ -272,7 +293,12 @@ pylint headtracker tests   # 10.00/10
 The GUI and the real MediaPipe inference path could not be executed in the
 environment this was written in — there is no display and the model asset is not
 downloadable. `gui.py` is import-checked against a stub and every attribute it
-touches was checked by AST against a definition, but it has not been run. Every
-number above comes from the synthetic rig, which models a pinhole camera and a
-rigid face; a real webcam adds motion blur, auto-exposure and a lens that is not
-a pinhole.
+touches was checked by AST against a definition, but it has not been run.
+
+Every number above comes from the synthetic rig, and that rig has one limitation
+worth stating plainly: **it builds faces from the same canonical model the pose
+solver fits.** It therefore cannot see the error a real face introduces, where
+the solver is fitting somebody else's skull. Two changes here exist specifically
+because of that blind spot — the generous reprojection bound and measuring head
+movement as a displacement rather than a position — and neither can be checked
+in this rig. Treat the real-camera behaviour as untested.

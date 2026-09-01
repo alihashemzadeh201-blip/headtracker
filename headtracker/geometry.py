@@ -163,9 +163,10 @@ class GazeSample:
     screen_y: float = 0.0
     """Where the gaze ray hits the screen plane, in model units.
 
-    These -- not the raw angles -- are what the calibration maps to pixels.
-    They already account for the head's position, distance and rotation, so
-    moving your head does not move the cursor away from what you are looking at.
+    Reported for diagnosis and for the geometry tests.  The cursor is *not*
+    driven by these: calibrating on them was tried and made accuracy worse in
+    use, because it tied the whole mapping to how well the pose solve recovers
+    the eye's absolute position.
     """
 
     yaw: float = 0.0
@@ -185,6 +186,15 @@ class GazeSample:
 
     head_position: tuple = (0.0, 0.0, 0.0)
     """Eye midpoint in camera coordinates, in model units."""
+
+    head_translation: tuple = (0.0, 0.0, 0.0)
+    """Where the face model's origin sits in camera coordinates.
+
+    Unlike :attr:`head_position` this does not move when the head turns -- it is
+    the solve's translation alone.  Head compensation uses it, because turning
+    the head is already accounted for by the gaze angle, while sliding or
+    leaning is not.
+    """
 
     head_yaw: float = 0.0
     head_pitch: float = 0.0
@@ -271,12 +281,20 @@ does.  A real face spans roughly 190 px at 1080p and stays above 40 px however
 far back the user sits.
 """
 
-MAX_REPROJECTION_ERROR_PX = 12.0
-"""Widest mean reprojection error still accepted as a real head pose.
+MAX_REPROJECTION_ERROR_PX = 60.0
+"""Mean reprojection error beyond which a pose is garbage rather than imperfect.
 
-Clean faces sit near 0.0 px, 1 px of landmark noise near 1.2 px and 8 px of
-noise near 9.5 px.  Past that the landmarks no longer agree with a rigid face
-and the recovered pose is unreliable, so the frame is dropped.
+Deliberately generous.  This started life at 12 px, tuned on synthetic faces
+whose landmarks come from the *same* canonical model the solver fits, where a
+real pose reprojects to 0.0 px.  A real face is not that model -- a different
+skull, a different nose -- so its reprojection error is large even when the
+pose is perfectly good, and a tight bound would have rejected every frame the
+camera ever produced.  The cursor would simply have frozen.
+
+The error is therefore used mainly to *choose* between solvers, and this bound
+only exists to throw out a solution that fits nothing at all.  Degenerate input
+is caught separately by ``MIN_FACE_SPREAD_PX``, which does not depend on the
+model matching.
 """
 
 _PNP_FLAGS = tuple(
@@ -304,6 +322,9 @@ def solve_head_rotation(
         return None
     dist_coeffs = np.zeros((4, 1), dtype=np.float64)
 
+    best_error = float("inf")
+    best_rvec: Optional[np.ndarray] = None
+    best_translation: Optional[np.ndarray] = None
     for flag_name in _PNP_FLAGS:
         try:
             ok, rvec, tvec = cv2.solvePnP(
@@ -320,12 +341,22 @@ def solve_head_rotation(
         translation = tvec.reshape(3)
         if translation[2] <= 0:
             continue
-        if reprojection_error(rvec, tvec, image_points, camera_matrix, dist_coeffs) > \
-                MAX_REPROJECTION_ERROR_PX:
-            continue
-        rotation, _ = cv2.Rodrigues(rvec)
-        return rotation, translation
-    return None
+        error = reprojection_error(rvec, tvec, image_points, camera_matrix, dist_coeffs)
+        # Keep the solver that explains the landmarks best rather than taking
+        # the first one that runs.  The order in _PNP_FLAGS reflects which is
+        # most reliable in general, but on a near-coplanar point set the
+        # solvers genuinely disagree, and the fit is the only arbiter.
+        if error < best_error:
+            best_error, best_rvec, best_translation = error, rvec, translation
+        if error <= MAX_REPROJECTION_ERROR_PX / 4.0:
+            break  # good enough that trying the rest cannot help
+
+    if best_rvec is None or best_translation is None:
+        return None
+    if best_error > MAX_REPROJECTION_ERROR_PX:
+        return None
+    rotation, _ = cv2.Rodrigues(best_rvec)
+    return rotation, best_translation
 
 
 def reprojection_error(
@@ -593,6 +624,7 @@ class GazeEstimator:
 
         eye_origin = rotation_matrix @ EYE_MID_MODEL + tvec
         sample.head_position = (float(eye_origin[0]), float(eye_origin[1]), float(eye_origin[2]))
+        sample.head_translation = (float(tvec[0]), float(tvec[1]), float(tvec[2]))
 
         sample.left_eye_open = eye_aspect_ratio(points, (33, 160, 158, 133, 153, 144))
         sample.right_eye_open = eye_aspect_ratio(points, (362, 385, 387, 263, 373, 380))

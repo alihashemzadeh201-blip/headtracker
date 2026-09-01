@@ -234,7 +234,7 @@ class HeadTrackerApp(ctk.CTk):
 
         if self.session is not None:
             if sample.valid:
-                self.session.add_sample(sample.screen_x, sample.screen_y)
+                self.session.add_sample(sample.yaw, sample.pitch, sample.head_translation)
             if self.session.update(now):
                 self._finish_calibration()
             elif self.overlay is not None:

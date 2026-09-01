@@ -228,9 +228,7 @@ def _cursor_on(estimator, pixel, head_yaw=0.0, head_pitch=0.0, frames=200, **kwa
     positions = []
     pose = (head_yaw, head_pitch, eye_yaw, eye_pitch)
     for frame in range(frames):
-        sample = estimator.estimate(
-            face(pose, noise_px=1.0, seed=frame, **kwargs)
-        )
+        sample = estimator.estimate(face(pose, noise_px=1.0, seed=frame, **kwargs))
         controller.update(sample, frame / FPS)
         if frame >= frames - 60:
             positions.append(np.array(backend.position(), dtype=float))
@@ -238,21 +236,38 @@ def _cursor_on(estimator, pixel, head_yaw=0.0, head_pitch=0.0, frames=200, **kwa
 
 
 def _calibrate(estimator, columns=4, rows=4) -> CalibrationModel:
-    """Fit on measured plane points at the pose the user calibrates from."""
+    """Fit on measured gaze angles at the pose the user calibrates from.
+
+    The eye position is recorded alongside, because the controller compensates
+    head movement as a displacement from it.
+    """
+    _eyes.clear()
     xs = np.linspace(0.15 * SCREEN[0], 0.85 * SCREEN[0], columns)
     ys = np.linspace(0.20 * SCREEN[1], 0.80 * SCREEN[1], rows)
     grid_x, grid_y = np.meshgrid(xs, ys)
     pixels = np.column_stack([grid_x.ravel(), grid_y.ravel()])
 
-    features, targets = [], []
-    for pixel in pixels:
-        eye_yaw, eye_pitch = pixel_to_pose(pixel)
-        features.append(measure_plane(estimator, (0.0, 0.0, eye_yaw, eye_pitch)))
-        targets.append(pixel)
+    measured = [_observe(estimator, pixel) for pixel in pixels]
 
     model = CalibrationModel(degree=2)
-    model.fit(np.array(features), np.array(targets), screen=SCREEN)
+    model.fit(np.array(measured), np.array(pixels), screen=SCREEN)
+    model.reference_eye = tuple(np.mean(np.array(_eyes), axis=0))
     return model
+
+
+#: Head translations gathered by the last ``_calibrate`` call.  Kept aside
+#: because the fit takes angles and the controller needs the translation, and
+#: folding both through one return value made the call site unreadable.
+_eyes: list = []
+
+
+def _observe(estimator, pixel):
+    """One calibration observation: the gaze angles, recording the head pose."""
+    eye_yaw, eye_pitch = pixel_to_pose(pixel)
+    sample = estimator.estimate(face((0.0, 0.0, eye_yaw, eye_pitch)))
+    assert sample.valid, sample.reason
+    _eyes.append(sample.head_translation)
+    return (sample.yaw, sample.pitch)
 
 
 @pytest.mark.parametrize(
