@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from headtracker.calibration import (
+    PLANE_UNITS_PER_PIXEL,
     MIN_SAMPLES_PER_POINT,
     CalibrationModel,
     CalibrationSession,
@@ -201,8 +202,7 @@ def test_round_trip_through_json(tmp_path):
     targets = true_mapping(angles[:, 0], angles[:, 1])
     original = CalibrationModel(degree=2)
     original.reference = (1.0, 2.0)
-    original.reference_distance = 4300.0
-    original.fit(angles, targets, screen=SCREEN, reference_distance=4300.0)
+    original.fit(angles, targets, screen=SCREEN)
 
     path = tmp_path / "cal.json"
     original.save(path)
@@ -212,7 +212,6 @@ def test_round_trip_through_json(tmp_path):
     assert restored is not None
     probe = np.array([[5.0, -3.0], [-9.0, 6.0]])
     np.testing.assert_allclose(restored.predict(probe), original.predict(probe), rtol=1e-9)
-    assert restored.reference_distance == pytest.approx(4300.0)
 
 
 def test_loading_a_corrupt_file_returns_none(tmp_path):
@@ -241,7 +240,7 @@ def test_session_walks_every_point_and_fits():
             # Symmetric jitter around the true gaze for the point being shown.
             yaw, pitch = angles[current]
             wobble = 0.6 if (guard % 2) else -0.6
-            session.add_sample(yaw + wobble, pitch - wobble, distance=4200.0)
+            session.add_sample(yaw + wobble, pitch - wobble)
         session.update(clock)
 
     assert session.finished
@@ -249,7 +248,6 @@ def test_session_walks_every_point_and_fits():
 
     model = session.build(degree=2)
     assert model.is_fitted
-    assert model.reference_distance == pytest.approx(4200.0)
 
     # The jitter is symmetric, so its median is the true gaze and the fitted
     # surface should land back on the calibration target.
@@ -266,12 +264,11 @@ def test_session_uses_the_median_so_a_blink_cannot_move_a_point():
     session.update(0.0)  # leave the countdown
 
     for _ in range(20):
-        session.add_sample(5.0, 2.0, distance=4000.0)
-    session.add_sample(90.0, 90.0, distance=4000.0)  # a single wild sample
+        session.add_sample(5.0, 2.0)
+    session.add_sample(90.0, 90.0)  # a single wild sample
 
     session.update(1.5)  # commits the point
     assert session.features[0] == (5.0, 2.0)
-    assert session.reference_distance == pytest.approx(4000.0)
 
 
 def test_session_will_not_commit_without_enough_samples():
@@ -312,3 +309,34 @@ def test_design_matrix_shapes():
         design_matrix(features, 3)
     with pytest.raises(ValueError):
         design_matrix(np.zeros((5, 3)), 1)
+
+
+def test_the_uncalibrated_default_puts_the_plane_origin_at_screen_centre():
+    """The fallback's one assumption: the camera faces the user square on.
+
+    It maps the screen-plane origin -- where the optical axis meets the screen
+    -- to the middle of the monitor, at a gain derived from the face model's
+    physical scale rather than from a guessed angle range.
+    """
+    model = CalibrationModel.default(SCREEN)
+    assert model.predict_one(0.0, 0.0) == pytest.approx((SCREEN[0] / 2.0, SCREEN[1] / 2.0))
+
+    right, _ = model.predict_one(PLANE_UNITS_PER_PIXEL, 0.0)
+    _, down = model.predict_one(0.0, PLANE_UNITS_PER_PIXEL)
+    assert right == pytest.approx(SCREEN[0] / 2.0 + 1.0)
+    assert down == pytest.approx(SCREEN[1] / 2.0 + 1.0)
+
+
+def test_no_distance_factor_survives_in_the_mapping():
+    """Distance is handled by the screen-plane projection, not by a fitted term.
+
+    Both ``distance_factor`` and ``reference_distance`` existed to widen the
+    response when the user leaned back.  The ray/plane intersection does that
+    from the geometry, so keeping either would scale the same thing twice.
+    """
+    model = CalibrationModel.default(SCREEN)
+    assert not hasattr(model, "distance_factor")
+    assert not hasattr(model, "reference_distance")
+    assert "reference_distance" not in json.loads(
+        json.dumps(model.to_dict())  # pylint: disable=no-member
+    )

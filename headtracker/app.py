@@ -49,7 +49,7 @@ def run_headless(settings: AppSettings, columns: int, rows: int) -> int:
 
             if session is not None:
                 if sample.valid:
-                    session.add_sample(sample.yaw, sample.pitch, sample.distance)
+                    session.add_sample(sample.screen_x, sample.screen_y)
                 if session.update(now):
                     engine.install_calibration(session.build(settings.calibration_degree))
                     print(f"calibrated: {engine.controller.model.report.describe()}")

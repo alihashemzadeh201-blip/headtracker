@@ -46,7 +46,7 @@ def grid_points(columns: int = 3, rows: int = 3, margin: float = GRID_MARGIN) ->
 
 
 def design_matrix(features: np.ndarray, degree: int) -> np.ndarray:
-    """Build the polynomial design matrix for ``(N, 2)`` angle features."""
+    """Build the polynomial design matrix for ``(N, 2)`` screen-plane features."""
     features = np.asarray(features, dtype=np.float64)
     if features.ndim != 2 or features.shape[1] != 2:
         raise ValueError("features must have shape (N, 2)")
@@ -90,6 +90,21 @@ class CalibrationReport:
         )
 
 
+PLANE_UNITS_PER_PIXEL = 2.0
+"""Screen-plane units per screen pixel, for the uncalibrated fallback only.
+
+The screen plane is measured in the face model's own units.  The model spans
+its inter-ocular distance in 450 of them, and a typical head sits at a solved
+depth of about 4350 of them when it is 600 mm from the camera, so one unit is
+roughly 0.14 mm and a 530 mm-wide monitor is about 3800 units across.  On a
+1920 px panel that is about half a pixel per unit.
+
+Nothing downstream depends on this being right -- ``CalibrationModel.fit``
+measures the real gain -- it only has to be sane enough that the tracker is
+usable before anyone has calibrated.
+"""
+
+
 class CalibrationModel:
     """Fitted polynomial from gaze angles to screen pixels."""
 
@@ -100,7 +115,6 @@ class CalibrationModel:
         self.scale: Optional[np.ndarray] = None
         self.coefficients: Optional[np.ndarray] = None
         self.reference: Optional[Point] = None
-        self.reference_distance: float = 0.0
         self.screen: Point = (0.0, 0.0)
         self.report = CalibrationReport()
 
@@ -112,25 +126,31 @@ class CalibrationModel:
     def default(cls, screen: Point) -> "CalibrationModel":
         """A rough, uncalibrated map so the tracker is usable on first launch.
 
-        It assumes a straight-ahead gaze hits the middle of the screen and that
-        about +-18 deg of yaw and +-12 deg of pitch sweep the full width and
-        height.  Real setups deviate from that, which is exactly what
-        :meth:`fit` corrects -- but it is close enough to be usable immediately.
+        It assumes the camera sits squarely in front of the user, so the
+        optical axis meets the screen plane at the screen-plane origin and
+        straight-ahead gaze lands in the middle of the monitor.  The gain comes
+        from the face model's physical scale rather than from a chosen angle
+        range.
+
+        A camera that is not centred breaks the first assumption and shifts the
+        whole map by the offset of the mount -- which is the single largest term
+        calibration removes, and the reason the tracker asks for it.
         """
         width, height = float(screen[0]), float(screen[1])
+        pixels_per_unit = 1.0 / PLANE_UNITS_PER_PIXEL
         model = cls(degree=1)
         model.mean = np.zeros(2)
         model.scale = np.ones(2)
         model.coefficients = np.array(
             [
-                [width / 2.0, width / 36.0, 0.0],
-                [height / 2.0, 0.0, height / 24.0],
+                [width / 2.0, height / 2.0],
+                [pixels_per_unit, 0.0],
+                [0.0, pixels_per_unit],
             ],
             dtype=np.float64,
-        ).T
+        )
         model.screen = (width, height)
         model.reference = (0.0, 0.0)
-        model.reference_distance = 0.0
         model.report = CalibrationReport()
         return model
 
@@ -142,7 +162,6 @@ class CalibrationModel:
         features: np.ndarray,
         targets: np.ndarray,
         screen: Point,
-        reference_distance: float = 0.0,
         reject_outliers: bool = True,
     ) -> CalibrationReport:
         """Fit angles -> pixels, reporting the residual error in pixels."""
@@ -186,7 +205,6 @@ class CalibrationModel:
         all_residuals = np.linalg.norm(self.predict(features) - targets, axis=1)
         kept_residuals = all_residuals[keep]
         self.screen = (float(screen[0]), float(screen[1]))
-        self.reference_distance = float(reference_distance)
         self.report = CalibrationReport(
             rms_error=float(np.sqrt(np.mean(kept_residuals ** 2))),
             max_error=float(np.max(all_residuals)),
@@ -224,9 +242,9 @@ class CalibrationModel:
         matrix = design_matrix(normalised, self.degree)
         return matrix @ self.coefficients
 
-    def predict_one(self, yaw: float, pitch: float) -> Point:
-        """Map a single gaze angle pair to a screen pixel."""
-        x, y = self.predict(np.array([[yaw, pitch]]))[0]
+    def predict_one(self, screen_x: float, screen_y: float) -> Point:
+        """Map one screen-plane point to a pixel."""
+        x, y = self.predict(np.array([[screen_x, screen_y]]))[0]
         return float(x), float(y)
 
     def clamp_to_screen(self, point: Point) -> Point:
@@ -237,17 +255,6 @@ class CalibrationModel:
             min(max(point[0], 0.0), width - 1.0),
             min(max(point[1], 0.0), height - 1.0),
         )
-
-    def distance_factor(self, distance: float) -> float:
-        """Scale factor compensating for leaning towards or away from the screen.
-
-        A gaze angle sweeps a longer arc across the screen the further the head
-        is from it, so the angular offset from the calibration pose is scaled by
-        the ratio of the current to the reference head distance.
-        """
-        if self.reference_distance <= 0 or distance <= 0:
-            return 1.0
-        return min(max(distance / self.reference_distance, 0.6), 1.8)
 
     # -- persistence --------------------------------------------------------
     def to_dict(self) -> dict:
@@ -260,7 +267,6 @@ class CalibrationModel:
             "scale": self.scale.tolist(),
             "coefficients": self.coefficients.tolist(),
             "reference": list(self.reference) if self.reference else None,
-            "reference_distance": self.reference_distance,
             "screen": list(self.screen),
             "rms_error": self.report.rms_error,
         }
@@ -273,7 +279,6 @@ class CalibrationModel:
         model.coefficients = np.array(data["coefficients"], dtype=np.float64)
         reference = data.get("reference")
         model.reference = tuple(reference) if reference else None
-        model.reference_distance = float(data.get("reference_distance", 0.0))
         model.screen = tuple(data.get("screen", (0.0, 0.0)))
         model.report = CalibrationReport(
             rms_error=float(data.get("rms_error", float("inf"))),
@@ -318,12 +323,10 @@ class CalibrationSession:
         self.countdown_s = float(countdown_s)
         self.index = 0
         self._samples: List[Point] = []
-        self._distances: List[float] = []
         self._state = "countdown"
         self._state_started: Optional[float] = None
         self.features: List[Point] = []
         self.targets: List[Point] = []
-        self.reference_distance = 0.0
         self.finished = False
 
     @property
@@ -359,15 +362,13 @@ class CalibrationSession:
         self._state = "countdown"
         self._state_started = timestamp
 
-    def add_sample(self, yaw: float, pitch: float, distance: float = 0.0) -> bool:
+    def add_sample(self, screen_x: float, screen_y: float) -> bool:
         """Record a gaze sample; returns ``True`` while the point is still filling."""
         if not self.is_collecting():
             return False
-        if not math.isfinite(yaw) or not math.isfinite(pitch):
+        if not math.isfinite(screen_x) or not math.isfinite(screen_y):
             return True
-        self._samples.append((float(yaw), float(pitch)))
-        if distance > 0 and math.isfinite(distance):
-            self._distances.append(float(distance))
+        self._samples.append((float(screen_x), float(screen_y)))
         return True
 
     def update(  # pylint: disable=too-many-return-statements
@@ -385,7 +386,6 @@ class CalibrationSession:
             self._state = "collect"
             self._state_started = timestamp
             self._samples = []
-            self._distances = []
             return False
 
         if self._state != "collect":
@@ -411,11 +411,9 @@ class CalibrationSession:
         if not self._samples:
             return
         stacked = np.array(self._samples, dtype=np.float64)
-        yaw, pitch = np.median(stacked, axis=0)
-        self.features.append((float(yaw), float(pitch)))
+        centre_x, centre_y = np.median(stacked, axis=0)
+        self.features.append((float(centre_x), float(centre_y)))
         self.targets.append(self.current_target())
-        if self._distances:
-            self.reference_distance += float(np.median(self._distances))
 
     def build(self, degree: int = 2, ridge: float = 1e-3) -> CalibrationModel:
         """Fit the collected samples into a usable model."""
@@ -425,8 +423,6 @@ class CalibrationSession:
                 f"degree {degree} needs {coefficient_count(degree)}"
             )
         model = CalibrationModel(degree=degree, ridge=ridge)
-        if self.reference_distance > 0:
-            model.reference_distance = self.reference_distance / len(self.features)
         model.reference = (
             float(np.mean([f[0] for f in self.features])),
             float(np.mean([f[1] for f in self.features])),
@@ -435,6 +431,5 @@ class CalibrationSession:
             np.array(self.features, dtype=np.float64),
             np.array(self.targets, dtype=np.float64),
             screen=self.screen,
-            reference_distance=model.reference_distance,
         )
         return model

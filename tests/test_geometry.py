@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import math
 
+import cv2
 import numpy as np
 import pytest
 
 from headtracker.filters import OneEuroFilter
 from headtracker.geometry import (
+    MAX_REPROJECTION_ERROR_PX,
+    MODEL_POINTS,
+    PNP_IMAGE_POINTS,
     GazeEstimator,
     default_camera_matrix,
     estimate_iris_gaze,
     eye_aspect_ratio,
+    gaze_direction,
+    project_to_screen_plane,
+    reprojection_error,
     rotation_to_head_angles,
     solve_head_rotation,
 )
@@ -271,3 +278,151 @@ def test_distance_grows_as_the_face_moves_away(estimator):
     far = estimator.estimate(make_face(distance_mm=900).points)
     assert far.distance > near.distance * 1.8
     assert math.isfinite(near.distance)
+
+
+# --------------------------------------------------------------------------
+# Pose solver robustness
+# --------------------------------------------------------------------------
+def test_coincident_landmarks_are_rejected_rather_than_solved():
+    """The guard that keeps a lost face from producing a cursor position.
+
+    MediaPipe answers with coincident points when it loses the face, and PnP
+    will happily fit those: it reports the face at a depth of 1e16 with a
+    reprojection error of *exactly zero*, because every model point projects
+    onto the pixel the landmarks already share.  Only the physical size of the
+    face distinguishes that from a real pose.
+    """
+    camera = default_camera_matrix(WIDTH, HEIGHT, FOV)
+    assert solve_head_rotation(np.zeros((478, 2)), camera) is None
+
+
+def test_a_nearly_coincident_face_is_rejected_too():
+    camera = default_camera_matrix(WIDTH, HEIGHT, FOV)
+    points = np.zeros((478, 2))
+    points[list(PNP_IMAGE_POINTS)] = np.array([[0, 0], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5]])
+    assert solve_head_rotation(points, camera) is None
+
+
+def test_a_real_face_survives_heavy_landmark_noise():
+    """The rejection must not be so eager that it drops usable frames.
+
+    This is the failure the solver change was made to fix: ``ITERATIVE`` alone
+    returned a mirrored, negative-depth solution on 17 of 60 jittered frames,
+    and every one of those became a dropped frame and a stuttering cursor.
+    """
+    camera = default_camera_matrix(WIDTH, HEIGHT, FOV)
+    depths = []
+    for index in range(60):
+        points = make_face(head_yaw=10.0, eye_yaw=8.0, noise_px=3.0, seed=index,
+                           width=WIDTH, height=HEIGHT).points
+        solved = solve_head_rotation(points, camera)
+        assert solved is not None, f"frame {index} was rejected"
+        depths.append(solved[1][2])
+
+    depths = np.array(depths)
+    assert np.all(depths > 0)
+    # A stable depth means the solver is not flipping between branches.
+    assert depths.std() < 200.0, f"depth std {depths.std():.0f}"
+
+
+def test_reprojection_error_separates_a_real_pose_from_a_fabricated_one():
+    camera = default_camera_matrix(WIDTH, HEIGHT, FOV)
+    points = make_face(head_yaw=10.0, eye_yaw=8.0, width=WIDTH, height=HEIGHT).points
+    face_points = np.array([points[i] for i in PNP_IMAGE_POINTS], dtype=np.float64)
+    distortion = np.zeros((4, 1))
+
+    ok, rvec, tvec = cv2.solvePnP(
+        MODEL_POINTS, face_points, camera, distortion, flags=cv2.SOLVEPNP_SQPNP
+    )
+    assert ok
+    good = reprojection_error(rvec, tvec, face_points, camera, distortion)
+    assert good < MAX_REPROJECTION_ERROR_PX
+
+    # The same landmarks explained by a rotation that is not the face's.
+    # Measured: 0.0 px for the real pose against 59.9 px for this one, either
+    # side of a 12 px threshold.
+    wrong, _ = cv2.Rodrigues(np.array([1.7, -1.2, 0.9]))
+    bad = reprojection_error(wrong, tvec, face_points, camera, distortion)
+    assert bad > MAX_REPROJECTION_ERROR_PX
+
+
+# --------------------------------------------------------------------------
+# Screen-plane projection
+# --------------------------------------------------------------------------
+def test_a_downward_gaze_hits_the_plane_in_front_of_the_eye():
+    """Sign convention: pitch > 0 looks down, so it must land below the eye."""
+    hit = project_to_screen_plane(np.array([0.0, 0.0, 4000.0]), gaze_direction(0.0, 10.0))
+    assert hit is not None
+    assert hit[1] > 0.0
+
+
+def test_a_gaze_parallel_to_the_screen_never_arrives():
+    """Looking along the horizon meets the plane at infinity, not at a pixel."""
+    assert project_to_screen_plane(np.array([0.0, 0.0, 4000.0]),
+                                  gaze_direction(0.0, 90.0)) is None
+
+
+def test_the_hit_point_moves_with_the_eye_at_a_fixed_angle():
+    """The whole point of projecting instead of integrating an angle.
+
+    Sliding the eye sideways while holding the gaze direction still has to move
+    the hit point by exactly the same amount: the ray translates with its
+    origin.  An angle-only mapping reports "unchanged" here, which is why a
+    head that drifts off centre takes the cursor with it in the wrong direction.
+    """
+    direction = gaze_direction(5.0, -3.0)
+    near = project_to_screen_plane(np.array([0.0, 0.0, 4000.0]), direction)
+    shifted = project_to_screen_plane(np.array([120.0, 0.0, 4000.0]), direction)
+    assert near is not None and shifted is not None
+    assert shifted[0] - near[0] == pytest.approx(120.0, abs=1e-9)
+    assert shifted[1] == pytest.approx(near[1], abs=1e-9)
+
+
+def test_the_lever_arm_grows_with_distance():
+    """Leaning back makes the same angle sweep more screen, automatically.
+
+    This is what the removed ``compensate_distance`` factor approximated with a
+    fitted correction; the projection gets it from the geometry instead.
+    """
+    near = project_to_screen_plane(np.array([0.0, 0.0, 3000.0]), gaze_direction(10.0, 0.0))
+    far = project_to_screen_plane(np.array([0.0, 0.0, 4500.0]), gaze_direction(10.0, 0.0))
+    assert near is not None and far is not None
+    assert far[0] / near[0] == pytest.approx(1.5, rel=1e-6)
+
+
+def test_moving_the_head_across_the_frame_moves_the_screen_point(estimator):
+    """End to end: translate the landmarks, hold the gaze, watch the ray follow.
+
+    The shift is applied to every landmark at once, which is exactly what a
+    head sliding sideways in the camera's view looks like.
+    """
+    base = make_face(head_yaw=5.0, eye_yaw=10.0, width=WIDTH, height=HEIGHT).points
+    still = estimator.estimate(base)
+    moved = estimator.estimate(base + np.array([-30.0, 0.0]))
+
+    assert still.valid and moved.valid
+    # The gaze angle is unchanged -- the eyes are doing the same thing.
+    assert moved.yaw == pytest.approx(still.yaw, abs=0.5)
+    # And the ray now starts 30 px further left, so it lands further left too.
+    # Measured at this resolution: -120.8 screen units for a -30 px shift.
+    assert moved.screen_x < still.screen_x - 20.0
+    assert moved.screen_y == pytest.approx(still.screen_y, abs=30.0)
+
+
+def test_the_wider_eye_frame_is_quieter_than_the_two_corners():
+    """Guards the noise measurement behind ``LEFT_EYE_FRAME``.
+
+    The eye centre is one subtraction of two jittering points, so it carries
+    most of the measurement noise.  Averaging the eight landmarks on the rim
+    instead of the two corners measured 0.882 deg against 1.163 deg; if that
+    ever regresses, the cursor jitter regresses with it.
+    """
+    estimator = GazeEstimator(1920, 1080, camera_fov_deg=60.0)
+    yaws = []
+    for index in range(120):
+        sample = estimator.estimate(
+            make_face(head_yaw=5.0, eye_yaw=12.0, noise_px=1.0, seed=index,
+                      width=1920, height=1080).points
+        )
+        yaws.append(sample.yaw)
+    assert float(np.std(yaws)) < 1.0, f"yaw std {np.std(yaws):.3f} deg"

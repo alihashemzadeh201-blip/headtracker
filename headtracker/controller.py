@@ -26,26 +26,28 @@ class CursorSettings:
     gain: float = 1.0
     """Multiplier on the offset from the calibration centre."""
 
-    min_cutoff: float = 0.8
+    min_cutoff: float = 0.3
     """One Euro cut-off in Hz while the gaze is nearly still -- lower is steadier.
 
-    Measured on synthetic faces with 1 px of landmark jitter at 30 fps, 0.8 Hz
-    cuts the resting cursor jitter from 2.4 deg to 1.2 deg.  Going much lower
-    keeps reducing jitter but adds visible lag to a quick glance.
+    Measured on synthetic faces with 1 px of landmark jitter at 30 fps on a
+    1920x1080 screen: 0.3 Hz holds the resting cursor to about 17 px of wobble
+    against 46 px unfiltered, and reaches 90% of a 1200 px glance in 133 ms.
+    Dropping to 0.15 Hz buys another 4 px of steadiness for 34 ms more lag.
     """
 
-    beta: float = 0.05
-    """How fast the filter opens up with gaze speed -- higher is snappier.
+    beta: float = 1.1
+    """How fast the filter opens up with gaze speed, in Hz per screen height/s.
 
-    At 0.05 the cursor reaches 90% of a 14 deg glance in about 100 ms.  Raising
-    beta shortens that to ~67 ms but lets roughly 20% more jitter through.
+    Expressed as a fraction of the screen rather than in pixels so that the
+    same number means the same thing on any monitor: the controller divides it
+    by the screen height when it reaches the filter.  In pixels the term is
+    large -- a 1 px landmark wobble at 30 fps reads as roughly 900 px/s -- so a
+    beta carried over from an angle-space tuning silently opens the filter
+    right up, which is what made 0.05 behave as if no filter were running.
     """
 
     max_speed: float = 9000.0
     """Cursor speed above which a frame is treated as a tracking glitch."""
-
-    compensate_distance: bool = True
-    """Scale the gaze offset by how far the head is from the screen."""
 
     hold_on_invalid_s: float = 0.3
     """Keep the cursor still for this long after tracking is lost."""
@@ -68,6 +70,11 @@ class GazeCursorController:
         self._gate = GlitchGate()
         self._invalid_since: Optional[float] = None
         self._holding = False
+        # Constructing the filters above and pushing the settings in here, rather
+        # than passing them to the constructors, keeps the attributes the only
+        # place the tunables live.  Skipping this step silently ran the filters
+        # at their library defaults no matter what the caller asked for.
+        self.apply_settings(self.settings)
 
     # -- configuration ------------------------------------------------------
     def set_model(self, model: CalibrationModel) -> None:
@@ -81,11 +88,23 @@ class GazeCursorController:
 
     def apply_settings(self, settings: CursorSettings) -> None:
         self.settings = settings
+        beta = settings.beta / self._beta_scale()
         self._filter_x.min_cutoff = settings.min_cutoff
-        self._filter_x.beta = settings.beta
+        self._filter_x.beta = beta
         self._filter_y.min_cutoff = settings.min_cutoff
-        self._filter_y.beta = settings.beta
+        self._filter_y.beta = beta
         self._gate.max_speed = settings.max_speed
+
+    def _beta_scale(self) -> float:
+        """Screen height, the unit ``CursorSettings.beta`` is expressed in.
+
+        The filter's speed term is measured in pixels per second, so a beta
+        written per pixel would mean something different on every monitor.
+        Dividing by the screen height converts the setting into that space and
+        leaves the value the user sees resolution independent.
+        """
+        _, height = self.mouse.screen
+        return float(height) if height > 0 else 1.0
 
     def reset(self) -> None:
         """Forget all smoothing state, e.g. after tracking was lost."""
@@ -102,13 +121,16 @@ class GazeCursorController:
 
     # -- main path ----------------------------------------------------------
     def gaze_to_screen(self, sample: GazeSample) -> Point:
-        """Project a gaze sample through the calibration, before smoothing."""
-        raw_x, raw_y = self.model.predict_one(sample.yaw, sample.pitch)
+        """Project a gaze sample through the calibration, before smoothing.
+
+        No distance term is applied here: the screen-plane projection in
+        :mod:`headtracker.geometry` already scales the gaze by the head's
+        distance from the screen, so leaning back is handled analytically rather
+        than by a fitted correction factor.
+        """
+        raw_x, raw_y = self.model.predict_one(sample.screen_x, sample.screen_y)
 
         gain = self.settings.gain
-        if self.settings.compensate_distance:
-            gain *= self.model.distance_factor(sample.distance)
-
         reference = self.model.reference
         if reference is not None and abs(gain - 1.0) > 1e-9:
             centre_x, centre_y = self.model.predict_one(reference[0], reference[1])
