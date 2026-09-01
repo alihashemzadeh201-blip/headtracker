@@ -137,6 +137,7 @@ class HeadTrackerApp(ctk.CTk):
             ("wink_click", "Wink to click"),
             ("dwell_click", "Dwell to click"),
             ("use_eyes", "Use eye tracking (iris)"),
+            ("compensate_distance", "Compensate for leaning"),
             ("mirror_preview", "Mirror preview"),
         ):
             variable = ctk.BooleanVar(value=getattr(self.settings, key))
@@ -234,7 +235,7 @@ class HeadTrackerApp(ctk.CTk):
 
         if self.session is not None:
             if sample.valid:
-                self.session.add_sample(sample.yaw, sample.pitch, sample.head_translation)
+                self.session.add_sample(sample.yaw, sample.pitch, sample.distance)
             if self.session.update(now):
                 self._finish_calibration()
             elif self.overlay is not None:

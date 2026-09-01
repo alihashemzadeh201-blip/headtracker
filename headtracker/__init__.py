@@ -3,13 +3,11 @@
 Accuracy comes from four pieces working together:
 
 ``geometry``
-    Recovers where the eye is with ``cv2.solvePnP`` and which way it points from
-    the iris landmarks, then intersects that ray with the screen plane. Because
-    the head's position and distance enter the arithmetic, moving your head does
-    not move the point you are looking at.
+    Recovers head rotation with ``cv2.solvePnP`` and eye rotation from the iris
+    landmarks, giving a translation-invariant gaze direction in degrees.
 ``calibration``
-    Fits a polynomial from screen-plane points to screen pixels, absorbing the
-    camera mounting angle, the screen's tilt and individual eye geometry.
+    Fits a polynomial from gaze angles to screen pixels, absorbing the camera
+    mounting angle, the monitor distance and individual eye geometry.
 ``filters``
     One Euro smoothing keeps the cursor steady at rest without lagging a glance.
 ``controller`` / ``mouse``

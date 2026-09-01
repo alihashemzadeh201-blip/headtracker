@@ -82,7 +82,7 @@ def measure_at(estimator, pixels: np.ndarray, noise_px: float = 0.0) -> np.ndarr
     """The gaze angles the estimator actually reports when aimed at pixels.
 
     Evaluation must go through the estimator, because the running app feeds the
-    calibration *measured* angles.  Scoring it against the ideal ones instead
+    calibration *measured* angles.  Scoring it against the ideal angles instead
     would charge the model for the estimator's own (calibrated-away) bias.
     """
     required = pixel_to_gaze(pixels[:, 0], pixels[:, 1])
@@ -148,7 +148,7 @@ def run_calibration(estimator, columns=4, rows=4, noise_px=0.0) -> CalibrationMo
                 estimator, required[0], required[1], noise_px=noise_px, seed=guard
             )
             if sample.valid:
-                session.add_sample(sample.yaw, sample.pitch, sample.head_translation)
+                session.add_sample(sample.yaw, sample.pitch, sample.distance)
         session.update(clock)
 
     assert session.finished, "calibration never completed"

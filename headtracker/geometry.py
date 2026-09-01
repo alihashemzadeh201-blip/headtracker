@@ -49,16 +49,6 @@ RIGHT_EYE_OUTER = 263
 RIGHT_EYE_UPPER = 386
 RIGHT_EYE_LOWER = 374
 
-#: Every landmark that sits on the rim of each eye socket.  Their centroid is
-#: the eye's centre, which is what the iris offset is measured against.  The
-#: two corners alone would do, but the centre is the noisier half of that
-#: measurement -- it is one subtraction of two jittering points -- and averaging
-#: eight of them instead of two cut the single-frame yaw error from 1.163 deg to
-#: 0.882 deg at 1 px of landmark jitter, with no measured cost when the eye is
-#: half closed.
-LEFT_EYE_FRAME = (33, 133, 144, 145, 153, 158, 159, 160)
-RIGHT_EYE_FRAME = (362, 263, 373, 374, 380, 385, 386, 387)
-
 MOUTH_LEFT = 61
 MOUTH_RIGHT = 291
 
@@ -113,61 +103,10 @@ MODEL_POINTS = np.array(
 
 PNP_IMAGE_POINTS = (NOSE_TIP, CHIN, LEFT_EYE_OUTER, RIGHT_EYE_OUTER, MOUTH_LEFT, MOUTH_RIGHT)
 
-#: Midpoint of the two model eye corners -- the ray origin for the gaze.
-EYE_MID_MODEL = 0.5 * (MODEL_POINTS[2] + MODEL_POINTS[3])
-
-
-def gaze_direction(yaw_deg: float, pitch_deg: float) -> np.ndarray:
-    """Unit gaze direction in camera coordinates.
-
-    Follows the sign convention used everywhere here: +x towards image right,
-    +y towards image bottom, and a negative z because the user looks back
-    towards the camera rather than into the scene.
-    """
-    direction = np.array(
-        [math.tan(math.radians(yaw_deg)), math.tan(math.radians(pitch_deg)), -1.0]
-    )
-    return direction / float(np.linalg.norm(direction))
-
-
-def project_to_screen_plane(
-    origin: np.ndarray, direction: np.ndarray, plane_z: float = 0.0
-) -> Optional[Tuple[float, float]]:
-    """Intersect the gaze ray with the screen plane and return that point.
-
-    The webcam sits on the monitor, so the screen plane passes essentially
-    through the camera: ``plane_z = 0``.  Whatever residual tilt and offset the
-    real setup has is a smooth function of position, which the calibration
-    absorbs.
-
-    The important property is that the result depends on *where the eye is* as
-    well as where it points, so it stays correct when the head moves.  Leaning
-    left shifts the origin left and the hit point follows; moving back lengthens
-    the lever arm and the same angle sweeps further.  Both are handled here
-    analytically instead of being fitted.
-    """
-    if direction[2] >= -1e-6:
-        return None  # looking away from the screen
-    scale = (plane_z - origin[2]) / direction[2]
-    if scale <= 0:
-        return None  # the screen is behind the eye
-    hit = origin + scale * direction
-    return float(hit[0]), float(hit[1])
-
 
 @dataclass
 class GazeSample:
     """Everything the controller needs from a single video frame."""
-
-    screen_x: float = 0.0
-    screen_y: float = 0.0
-    """Where the gaze ray hits the screen plane, in model units.
-
-    Reported for diagnosis and for the geometry tests.  The cursor is *not*
-    driven by these: calibrating on them was tried and made accuracy worse in
-    use, because it tied the whole mapping to how well the pose solve recovers
-    the eye's absolute position.
-    """
 
     yaw: float = 0.0
     """Gaze yaw in degrees relative to the camera axis (positive = screen right)."""
@@ -183,18 +122,6 @@ class GazeSample:
 
     source: str = "none"
     """``"iris"`` when the eyes drove the estimate, ``"head"`` when they could not."""
-
-    head_position: tuple = (0.0, 0.0, 0.0)
-    """Eye midpoint in camera coordinates, in model units."""
-
-    head_translation: tuple = (0.0, 0.0, 0.0)
-    """Where the face model's origin sits in camera coordinates.
-
-    Unlike :attr:`head_position` this does not move when the head turns -- it is
-    the solve's translation alone.  Head compensation uses it, because turning
-    the head is already accounted for by the gaze angle, while sliding or
-    leaning is not.
-    """
 
     head_yaw: float = 0.0
     head_pitch: float = 0.0
@@ -261,121 +188,26 @@ def default_camera_matrix(width: int, height: int, fov_deg: float = 60.0) -> np.
     )
 
 
-#: Solver flags to try, in order.
-#:
-#: The six model points are very nearly coplanar, which makes the PnP problem
-#: ambiguous: ``SOLVEPNP_ITERATIVE`` happily returns the mirrored solution, and
-#: with one pixel of landmark jitter it did so on 28% of frames in measurement.
-#: Those frames carry a negative depth, get rejected, and the cursor visibly
-#: stutters.  ``SQPNP`` is a globally optimal solver with no such ambiguity --
-#: measured depth std 20 model units against 4010 for ``ITERATIVE``.
-MIN_FACE_SPREAD_PX = 20.0
-"""Smallest span of the pose landmarks that is still a usable face.
-
-The guard that actually rejects degenerate input.  When MediaPipe loses the
-face it returns coincident points, and PnP answers those with a rotation and a
-translation of ``1e16`` -- a solution whose reprojection error is *zero*,
-because every model point projects onto the same pixel the landmarks already
-share.  Nothing about the fit detects it; only the physical size of the face
-does.  A real face spans roughly 190 px at 1080p and stays above 40 px however
-far back the user sits.
-"""
-
-MAX_REPROJECTION_ERROR_PX = 60.0
-"""Mean reprojection error beyond which a pose is garbage rather than imperfect.
-
-Deliberately generous.  This started life at 12 px, tuned on synthetic faces
-whose landmarks come from the *same* canonical model the solver fits, where a
-real pose reprojects to 0.0 px.  A real face is not that model -- a different
-skull, a different nose -- so its reprojection error is large even when the
-pose is perfectly good, and a tight bound would have rejected every frame the
-camera ever produced.  The cursor would simply have frozen.
-
-The error is therefore used mainly to *choose* between solvers, and this bound
-only exists to throw out a solution that fits nothing at all.  Degenerate input
-is caught separately by ``MIN_FACE_SPREAD_PX``, which does not depend on the
-model matching.
-"""
-
-_PNP_FLAGS = tuple(
-    name
-    for name in ("SOLVEPNP_SQPNP", "SOLVEPNP_EPNP", "SOLVEPNP_ITERATIVE")
-    if hasattr(cv2, name)
-)
-
-
 def solve_head_rotation(
     points: np.ndarray, camera_matrix: np.ndarray
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Recover ``(R, t)`` mapping the face model into camera coordinates.
-
-    Returns ``None`` rather than a mirrored solution: a face in front of the
-    camera always has positive depth, so a negative ``t`` means the solver found
-    the wrong branch and the frame is unusable.
-    """
+    """Recover ``(R, t)`` mapping the face model into camera coordinates."""
     if points.shape[0] <= max(PNP_IMAGE_POINTS):
         return None
     image_points = np.array([points[i] for i in PNP_IMAGE_POINTS], dtype=np.float64)
     if not np.all(np.isfinite(image_points)):
         return None
-    if float(np.ptp(image_points, axis=0).max()) < MIN_FACE_SPREAD_PX:
-        return None
     dist_coeffs = np.zeros((4, 1), dtype=np.float64)
-
-    best_error = float("inf")
-    best_rvec: Optional[np.ndarray] = None
-    best_translation: Optional[np.ndarray] = None
-    for flag_name in _PNP_FLAGS:
-        try:
-            ok, rvec, tvec = cv2.solvePnP(
-                MODEL_POINTS,
-                image_points,
-                camera_matrix,
-                dist_coeffs,
-                flags=getattr(cv2, flag_name),
-            )
-        except cv2.error:
-            continue
-        if not ok:
-            continue
-        translation = tvec.reshape(3)
-        if translation[2] <= 0:
-            continue
-        error = reprojection_error(rvec, tvec, image_points, camera_matrix, dist_coeffs)
-        # Keep the solver that explains the landmarks best rather than taking
-        # the first one that runs.  The order in _PNP_FLAGS reflects which is
-        # most reliable in general, but on a near-coplanar point set the
-        # solvers genuinely disagree, and the fit is the only arbiter.
-        if error < best_error:
-            best_error, best_rvec, best_translation = error, rvec, translation
-        if error <= MAX_REPROJECTION_ERROR_PX / 4.0:
-            break  # good enough that trying the rest cannot help
-
-    if best_rvec is None or best_translation is None:
+    try:
+        ok, rvec, tvec = cv2.solvePnP(
+            MODEL_POINTS, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
+        )
+    except cv2.error:
         return None
-    if best_error > MAX_REPROJECTION_ERROR_PX:
+    if not ok:
         return None
-    rotation, _ = cv2.Rodrigues(best_rvec)
-    return rotation, best_translation
-
-
-def reprojection_error(
-    rvec: np.ndarray,
-    tvec: np.ndarray,
-    image_points: np.ndarray,
-    camera_matrix: np.ndarray,
-    distortion: np.ndarray,
-) -> float:
-    """Mean distance in pixels between the landmarks and where PnP places them.
-
-    A pose that really fits the face puts its model points within a couple of
-    pixels of the landmarks.  Note that this cannot reject coincident landmarks
-    on its own: for those, the face is "infinitely far away", every model point
-    projects to the same pixel, and the error comes out exactly zero.
-    """
-    projected, _ = cv2.projectPoints(MODEL_POINTS, rvec, tvec, camera_matrix, distortion)
-    projected = np.asarray(projected, dtype=np.float64).reshape(-1, 2)
-    return float(np.mean(np.linalg.norm(projected - image_points.reshape(-1, 2), axis=1)))
+    rotation, _ = cv2.Rodrigues(rvec)
+    return rotation, tvec.reshape(3)
 
 
 def rotation_to_head_angles(rotation: np.ndarray) -> Tuple[float, float, float]:
@@ -421,15 +253,14 @@ def iris_radius(points: np.ndarray, iris: Sequence[int]) -> float:
     return float(np.median(radii))
 
 
-# Six parameters because the eye frame is defined by four independent landmark
-# groups -- corners for the horizontal axis, lid pair for the vertical, the whole
-# rim for the centre, the iris ring for the scale -- and collapsing them into one
-# tuple per eye would hide which index is which at the call site.
-def _eye_iris_offset(  # pylint: disable=too-many-positional-arguments,too-many-locals
+# One parameter per landmark that defines the eye frame; grouping them would
+# hide which index is which at the two call sites.
+def _eye_iris_offset(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     points: np.ndarray,
-    corners: Tuple[int, int],
-    lids: Tuple[int, int],
-    frame: Sequence[int],
+    corner_a: int,
+    corner_b: int,
+    upper: int,
+    lower: int,
     iris: Sequence[int],
     fallback_scale: float,
 ) -> Optional[Tuple[float, float]]:
@@ -440,18 +271,12 @@ def _eye_iris_offset(  # pylint: disable=too-many-positional-arguments,too-many-
     naming.  Those names swap sides between the two eyes, and deriving the axis
     from them makes one eye's horizontal offset the mirror image of the other's,
     so averaging the pair cancels the signal instead of halving its noise.
-
-    The axes come from the corners and the lid pair, which are the landmarks
-    that define the eye's orientation; only the *centre* is averaged over the
-    whole rim.  Keeping the two apart matters: the lid points drift when the
-    eye squints, and an axis built from a drifting pair would rotate the
-    measurement, whereas a centre built from them only translates it.
     """
-    needed = max(list(corners) + list(lids) + list(frame) + list(iris))
+    needed = max([corner_a, corner_b, upper, lower] + list(iris))
     if points.shape[0] <= needed:
         return None
 
-    corner_axis = points[corners[1]] - points[corners[0]]
+    corner_axis = points[corner_b] - points[corner_a]
     width = np.linalg.norm(corner_axis)
     if width < 1e-6:
         return None
@@ -459,7 +284,7 @@ def _eye_iris_offset(  # pylint: disable=too-many-positional-arguments,too-many-
     if axis_x[0] < 0:
         axis_x = -axis_x
 
-    lid_axis = points[lids[1]] - points[lids[0]]
+    lid_axis = points[lower] - points[upper]
     axis_y = lid_axis - axis_x * float(np.dot(lid_axis, axis_x))
     height = np.linalg.norm(axis_y)
     if height < 1e-6:
@@ -483,7 +308,7 @@ def _eye_iris_offset(  # pylint: disable=too-many-positional-arguments,too-many-
     # 1.7 deg of single-frame gaze error instead of 2.25 deg.
     iris_centre = points[list(iris)].mean(axis=0)
 
-    eye_centre = points[list(frame)].mean(axis=0)
+    eye_centre = 0.5 * (points[corner_a] + points[corner_b])
     delta = iris_centre - eye_centre
     return (
         float(np.dot(delta, axis_x)) / scale,
@@ -517,13 +342,11 @@ def estimate_iris_gaze(points: np.ndarray) -> Optional[Tuple[float, float, float
 
     yaws = []
     pitches = []
-    for corners, lids, frame, iris in (
-        ((LEFT_EYE_OUTER, LEFT_EYE_INNER), (LEFT_EYE_UPPER, LEFT_EYE_LOWER),
-         LEFT_EYE_FRAME, LEFT_IRIS),
-        ((RIGHT_EYE_OUTER, RIGHT_EYE_INNER), (RIGHT_EYE_UPPER, RIGHT_EYE_LOWER),
-         RIGHT_EYE_FRAME, RIGHT_IRIS),
+    for outer, inner, upper, lower, iris in (
+        (LEFT_EYE_OUTER, LEFT_EYE_INNER, LEFT_EYE_UPPER, LEFT_EYE_LOWER, LEFT_IRIS),
+        (RIGHT_EYE_OUTER, RIGHT_EYE_INNER, RIGHT_EYE_UPPER, RIGHT_EYE_LOWER, RIGHT_IRIS),
     ):
-        measured = _eye_iris_offset(points, corners, lids, frame, iris, fallback_scale)
+        measured = _eye_iris_offset(points, outer, inner, upper, lower, iris, fallback_scale)
         if measured is not None:
             yaws.append(_offset_to_angle(measured[0]))
             pitches.append(_offset_to_angle(measured[1]))
@@ -568,44 +391,6 @@ class GazeEstimator:
             self.frame_width, self.frame_height, self.camera_fov_deg
         )
 
-    def _apply_iris(self, sample: GazeSample, points: np.ndarray) -> Optional[str]:
-        """Refine a head-pose sample with the iris measurement.
-
-        Returns the reason to reject the frame, or ``None`` to keep it.  When
-        the iris cannot be measured the sample is left on the head pose, which
-        is always available and is the right answer whenever the eyes sit
-        centred in their sockets.
-        """
-        iris = estimate_iris_gaze(points)
-        if iris is None:
-            sample.reason = (
-                "iris landmarks unavailable"
-                if points.shape[0] < IRIS_LANDMARK_BASE
-                else "iris not measurable"
-            )
-            return None
-
-        iris_yaw, iris_pitch, iod = iris
-        sample.iris_yaw = iris_yaw
-        sample.iris_pitch = iris_pitch
-        sample.eyes_visible = True
-        sample.extras["iod_px"] = iod
-
-        if min(sample.left_eye_open, sample.right_eye_open) < self.min_eye_open:
-            # An iris centre measured through a closed lid is noise, and a user
-            # with their eyes shut is not looking at anything.  Holding the
-            # cursor beats guessing.
-            return "eyes closed"
-
-        # Not head + eye: the iris already encodes the total gaze.  It sits on
-        # the eyeball at the point the gaze exits, so its offset from the socket
-        # centre measures the gaze direction in the camera frame no matter how
-        # the head is turned -- adding the head angle on top would count it
-        # twice.
-        sample.yaw, sample.pitch = iris_yaw, iris_pitch
-        sample.source = "iris"
-        return None
-
     def estimate(self, points: np.ndarray) -> GazeSample:
         """Estimate the gaze for ``points``, an ``(N, 2)`` pixel array."""
         sample = GazeSample()
@@ -622,10 +407,6 @@ class GazeEstimator:
         sample.roll = roll
         sample.distance = float(tvec[2])
 
-        eye_origin = rotation_matrix @ EYE_MID_MODEL + tvec
-        sample.head_position = (float(eye_origin[0]), float(eye_origin[1]), float(eye_origin[2]))
-        sample.head_translation = (float(tvec[0]), float(tvec[1]), float(tvec[2]))
-
         sample.left_eye_open = eye_aspect_ratio(points, (33, 160, 158, 133, 153, 144))
         sample.right_eye_open = eye_aspect_ratio(points, (362, 385, 387, 263, 373, 380))
 
@@ -636,7 +417,33 @@ class GazeEstimator:
         rejected = None
 
         if self.use_eyes:
-            rejected = self._apply_iris(sample, points)
+            iris = estimate_iris_gaze(points)
+            if iris is None:
+                sample.reason = (
+                    "iris landmarks unavailable"
+                    if points.shape[0] < IRIS_LANDMARK_BASE
+                    else "iris not measurable"
+                )
+            else:
+                iris_yaw, iris_pitch, iod = iris
+                sample.iris_yaw = iris_yaw
+                sample.iris_pitch = iris_pitch
+                sample.eyes_visible = True
+                sample.extras["iod_px"] = iod
+
+                if min(sample.left_eye_open, sample.right_eye_open) < self.min_eye_open:
+                    # An iris centre measured through a closed lid is noise, and
+                    # a user with their eyes shut is not looking at anything.
+                    # Holding the cursor beats guessing.
+                    rejected = "eyes closed"
+                else:
+                    # Not head + eye: the iris already encodes the total gaze.
+                    # It sits on the eyeball at the point the gaze exits, so its
+                    # offset from the socket centre measures the gaze direction
+                    # in the camera frame no matter how the head is turned --
+                    # adding the head angle on top would count it twice.
+                    sample.yaw, sample.pitch = iris_yaw, iris_pitch
+                    sample.source = "iris"
 
         sample.yaw = _clamp(sample.yaw, -HEAD_ANGLE_LIMIT_DEG, HEAD_ANGLE_LIMIT_DEG)
         sample.pitch = _clamp(sample.pitch, -HEAD_ANGLE_LIMIT_DEG, HEAD_ANGLE_LIMIT_DEG)
@@ -647,12 +454,9 @@ class GazeEstimator:
         if not np.isfinite(sample.yaw) or not np.isfinite(sample.pitch):
             sample.reason = "non-finite gaze"
             return sample
-
-        hit = project_to_screen_plane(eye_origin, gaze_direction(sample.yaw, sample.pitch))
-        if hit is None or not all(np.isfinite(hit)):
-            sample.reason = "gaze does not reach the screen"
+        if sample.distance <= 0:
+            sample.reason = "invalid head distance"
             return sample
-        sample.screen_x, sample.screen_y = hit
 
         sample.valid = True
         return sample

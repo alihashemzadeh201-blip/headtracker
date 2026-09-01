@@ -1,8 +1,6 @@
-"""Cursor control: absolute positioning, head compensation, tracking loss."""
+"""Cursor control: absolute positioning, distance compensation, tracking loss."""
 
 from __future__ import annotations
-
-import math
 
 import numpy as np
 import pytest
@@ -15,14 +13,8 @@ from headtracker.mouse import AbsoluteMouse, NullBackend
 SCREEN = (1920.0, 1080.0)
 
 
-#: The eye position the calibration was taken from.  Head compensation is a
-#: displacement from here, so it has to be set for those tests to exercise
-#: anything.
-REFERENCE_EYE = (0.0, 0.0, 4000.0)
-
-
-def make_model() -> CalibrationModel:
-    """A simple linear map: 40 deg of yaw spans the screen width."""
+def make_model(reference_distance: float = 4000.0) -> CalibrationModel:
+    """A simple linear map: 20 deg of yaw spans half the screen width."""
     model = CalibrationModel.default(SCREEN)
     model.coefficients = np.array(
         [
@@ -32,7 +24,7 @@ def make_model() -> CalibrationModel:
         dtype=np.float64,
     ).T
     model.reference = (0.0, 0.0)
-    model.reference_eye = REFERENCE_EYE
+    model.reference_distance = reference_distance
     return model
 
 
@@ -43,18 +35,9 @@ def make_controller(**settings) -> tuple:
     return controller, backend
 
 
-def sample(yaw: float, pitch: float, valid: bool = True, head_shift=None) -> GazeSample:
-    """A gaze sample, optionally with the head displaced from the calibration pose.
-
-    ``head_shift`` is ``(dx, dy, dz)`` in face-model units, applied to
-    ``REFERENCE_EYE``.  It moves the pose *translation*, which is what the
-    controller compensates; a turned head is already covered by the angle.
-    """
-    translation = REFERENCE_EYE
-    if head_shift is not None:
-        translation = tuple(a + b for a, b in zip(REFERENCE_EYE, head_shift))
+def sample(yaw: float, pitch: float, distance: float = 4000.0, valid: bool = True) -> GazeSample:
     return GazeSample(
-        yaw=yaw, pitch=pitch, head_translation=translation, valid=valid,
+        yaw=yaw, pitch=pitch, distance=distance, valid=valid,
         reason="" if valid else "lost",
     )
 
@@ -138,68 +121,30 @@ def test_gain_scales_the_offset_from_the_calibration_centre():
     assert doubled_offset == pytest.approx(2.0 * plain_offset, abs=2.0)
 
 
-def test_a_head_at_the_calibration_pose_gets_no_correction():
-    """The property that makes the compensation safe to ship.
-
-    The eye position is recovered by solving against a canonical face model, so
-    it carries an unknown offset.  Measuring the shift from the calibration
-    pose cancels that offset exactly -- which is the whole reason the
-    correction is a difference and not an absolute position.
-    """
-    controller, backend = make_controller()
-    model = make_model()
-    model.reference_eye = None
-    controller.set_model(model)
+def test_leaning_back_scales_the_response():
+    """Sitting further away makes the same angle sweep more screen, so the
+    controller has to widen its response or the cursor falls short."""
+    controller, backend = make_controller(compensate_distance=True)
     for index in range(60):
-        controller.update(sample(8.0, 0.0), index / 30.0)
-    without = backend.position()[0]
-
-    controller.set_model(make_model())
-    for index in range(60, 180):
-        controller.update(sample(8.0, 0.0), index / 30.0)
-
-    assert backend.position()[0] == pytest.approx(without, abs=1.0)
-
-
-def test_a_shifted_head_moves_the_cursor_with_it():
-    """The compensation the user asked for: a head that slides sideways while
-    the gaze direction stays put must drag the cursor along.
-
-    The angle is unchanged, so the calibration alone says "stay put".  Only the
-    eye's displacement knows the look-at point has moved.
-    """
-    controller, backend = make_controller()
-    for index in range(60):
-        controller.update(sample(8.0, 0.0), index / 30.0)
-    before = backend.position()[0]
-
-    for index in range(60, 180):
-        controller.update(sample(8.0, 0.0, head_shift=(100.0, 0.0, 0.0)), index / 30.0)
-    after = backend.position()[0]
-
-    # The test model maps 40 deg to the screen width, so at 8 deg the local
-    # scale is SCREEN[0]/40 pixels per degree-equivalent of shift.
-    expected = 100.0 * SCREEN[0] / 40.0 / REFERENCE_EYE[2] * (180.0 / math.pi)
-    assert (after - before) == pytest.approx(expected, rel=0.05)
-
-
-def test_leaning_back_widens_the_response():
-    """Further from the screen, the same angle sweeps further -- analytically.
-
-    This is what the removed ``compensate_distance`` factor approximated with a
-    fitted correction.
-    """
-    controller, backend = make_controller()
-    for index in range(60):
-        controller.update(sample(8.0, 0.0), index / 30.0)
+        controller.update(sample(8.0, 0.0, distance=4000.0), index / 30.0)
     near = backend.position()[0]
 
-    for index in range(60, 180):
-        controller.update(sample(8.0, 0.0, head_shift=(0.0, 0.0, 500.0)), index / 30.0)
+    for index in range(60, 120):
+        controller.update(sample(8.0, 0.0, distance=5200.0), index / 30.0)
     far = backend.position()[0]
 
     centre = SCREEN[0] / 2.0
-    assert (far - centre) > (near - centre) * 1.05
+    assert (far - centre) > (near - centre) * 1.2
+
+
+def test_distance_compensation_can_be_disabled():
+    controller, backend = make_controller(compensate_distance=False)
+    for index in range(60):
+        controller.update(sample(8.0, 0.0, distance=4000.0), index / 30.0)
+    near = backend.position()[0]
+    for index in range(60, 120):
+        controller.update(sample(8.0, 0.0, distance=5200.0), index / 30.0)
+    assert backend.position()[0] == pytest.approx(near, abs=2.0)
 
 
 # --------------------------------------------------------------------------
@@ -271,7 +216,5 @@ def test_apply_settings_reaches_the_filters():
     controller, _ = make_controller()
     controller.apply_settings(CursorSettings(min_cutoff=0.4, beta=0.2, max_speed=1234.0))
     assert controller._filter_x.min_cutoff == 0.4  # pylint: disable=protected-access
+    assert controller._filter_y.beta == 0.2  # pylint: disable=protected-access
     assert controller._gate.max_speed == 1234.0  # pylint: disable=protected-access
-    # beta is entered per screen height and handed to the filter per pixel.
-    expected_beta = 0.2 / controller.mouse.screen[1]  # pylint: disable=protected-access
-    assert controller._filter_y.beta == pytest.approx(expected_beta)  # pylint: disable=protected-access

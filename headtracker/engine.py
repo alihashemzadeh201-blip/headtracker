@@ -76,6 +76,7 @@ class TrackingEngine:
             min_cutoff=settings.min_cutoff,
             beta=settings.beta,
             max_speed=settings.max_speed,
+            compensate_distance=settings.compensate_distance,
         )
 
     def apply_settings(self) -> None:

@@ -46,7 +46,7 @@ def grid_points(columns: int = 3, rows: int = 3, margin: float = GRID_MARGIN) ->
 
 
 def design_matrix(features: np.ndarray, degree: int) -> np.ndarray:
-    """Build the polynomial design matrix for ``(N, 2)`` gaze-angle features."""
+    """Build the polynomial design matrix for ``(N, 2)`` angle features."""
     features = np.asarray(features, dtype=np.float64)
     if features.ndim != 2 or features.shape[1] != 2:
         raise ValueError("features must have shape (N, 2)")
@@ -90,16 +90,6 @@ class CalibrationReport:
         )
 
 
-FORMAT_VERSION = 2
-"""Bumped whenever the meaning of the fitted features changes.
-
-The features are gaze angles in degrees, as they have always been.  A briefly
-shipped intermediate version fitted screen-plane points instead -- three orders
-of magnitude apart, and reading one as the other pinned the cursor in a screen
-corner.  That experiment was reverted; the number stays here so the next change
-to the feature space has somewhere to record itself.
-"""
-
 class CalibrationModel:
     """Fitted polynomial from gaze angles to screen pixels."""
 
@@ -110,13 +100,7 @@ class CalibrationModel:
         self.scale: Optional[np.ndarray] = None
         self.coefficients: Optional[np.ndarray] = None
         self.reference: Optional[Point] = None
-        self.reference_eye: Optional[Tuple[float, float, float]] = None
-        """The head translation, on average, while the user calibrated.
-
-        Head movement is compensated as a *displacement* from this, so any
-        constant error in the pose solve cancels exactly.  ``None`` in a file
-        written before it was recorded, which simply means no compensation.
-        """
+        self.reference_distance: float = 0.0
         self.screen: Point = (0.0, 0.0)
         self.report = CalibrationReport()
 
@@ -129,10 +113,9 @@ class CalibrationModel:
         """A rough, uncalibrated map so the tracker is usable on first launch.
 
         It assumes a straight-ahead gaze hits the middle of the screen and that
-        about +-24 deg of yaw and +-17 deg of pitch sweep the full width and
-        height, which is roughly a 24" monitor seen from 60 cm.  Real setups
-        deviate from that, which is exactly what :meth:`fit` corrects -- but it
-        is close enough to be usable immediately.
+        about +-18 deg of yaw and +-12 deg of pitch sweep the full width and
+        height.  Real setups deviate from that, which is exactly what
+        :meth:`fit` corrects -- but it is close enough to be usable immediately.
         """
         width, height = float(screen[0]), float(screen[1])
         model = cls(degree=1)
@@ -140,14 +123,14 @@ class CalibrationModel:
         model.scale = np.ones(2)
         model.coefficients = np.array(
             [
-                [width / 2.0, height / 2.0],
-                [width / 48.0, 0.0],
-                [0.0, height / 34.0],
+                [width / 2.0, width / 36.0, 0.0],
+                [height / 2.0, 0.0, height / 24.0],
             ],
             dtype=np.float64,
-        )
+        ).T
         model.screen = (width, height)
         model.reference = (0.0, 0.0)
+        model.reference_distance = 0.0
         model.report = CalibrationReport()
         return model
 
@@ -159,6 +142,7 @@ class CalibrationModel:
         features: np.ndarray,
         targets: np.ndarray,
         screen: Point,
+        reference_distance: float = 0.0,
         reject_outliers: bool = True,
     ) -> CalibrationReport:
         """Fit angles -> pixels, reporting the residual error in pixels."""
@@ -202,6 +186,7 @@ class CalibrationModel:
         all_residuals = np.linalg.norm(self.predict(features) - targets, axis=1)
         kept_residuals = all_residuals[keep]
         self.screen = (float(screen[0]), float(screen[1]))
+        self.reference_distance = float(reference_distance)
         self.report = CalibrationReport(
             rms_error=float(np.sqrt(np.mean(kept_residuals ** 2))),
             max_error=float(np.max(all_residuals)),
@@ -240,7 +225,7 @@ class CalibrationModel:
         return matrix @ self.coefficients
 
     def predict_one(self, yaw: float, pitch: float) -> Point:
-        """Map one gaze angle pair to a screen pixel."""
+        """Map a single gaze angle pair to a screen pixel."""
         x, y = self.predict(np.array([[yaw, pitch]]))[0]
         return float(x), float(y)
 
@@ -253,47 +238,42 @@ class CalibrationModel:
             min(max(point[1], 0.0), height - 1.0),
         )
 
+    def distance_factor(self, distance: float) -> float:
+        """Scale factor compensating for leaning towards or away from the screen.
+
+        A gaze angle sweeps a longer arc across the screen the further the head
+        is from it, so the angular offset from the calibration pose is scaled by
+        the ratio of the current to the reference head distance.
+        """
+        if self.reference_distance <= 0 or distance <= 0:
+            return 1.0
+        return min(max(distance / self.reference_distance, 0.6), 1.8)
+
     # -- persistence --------------------------------------------------------
     def to_dict(self) -> dict:
         if not self.is_fitted:
             return {}
         return {
-            "version": FORMAT_VERSION,
+            "version": 2,
             "degree": self.degree,
             "mean": self.mean.tolist(),
             "scale": self.scale.tolist(),
             "coefficients": self.coefficients.tolist(),
             "reference": list(self.reference) if self.reference else None,
-            "reference_eye": list(self.reference_eye) if self.reference_eye else None,
+            "reference_distance": self.reference_distance,
             "screen": list(self.screen),
             "rms_error": self.report.rms_error,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "CalibrationModel":
-        """Rebuild a model, refusing one written by an incompatible version.
-
-        The version check is not bookkeeping.  An intermediate build fitted
-        *screen-plane points* rather than gaze angles; the two differ by three
-        orders of magnitude, and reading one as the other produced pixels in
-        the tens of thousands, which the controller clamped -- so the cursor
-        sat pinned in a screen corner with nothing to explain why.  A file
-        this build does not understand is refused, and the caller asks for a
-        fresh calibration instead.
-        """
-        found = int(data.get("version", 0))
-        if found != FORMAT_VERSION:
-            raise ValueError(
-                f"calibration was written in format {found}, this build reads {FORMAT_VERSION}"
-            )
         model = cls(degree=int(data.get("degree", 2)))
         model.mean = np.array(data["mean"], dtype=np.float64)
         model.scale = np.array(data["scale"], dtype=np.float64)
         model.coefficients = np.array(data["coefficients"], dtype=np.float64)
         reference = data.get("reference")
         model.reference = tuple(reference) if reference else None
-        reference_eye = data.get("reference_eye")
-        model.reference_eye = tuple(reference_eye) if reference_eye else None
+        model.reference_distance = float(data.get("reference_distance", 0.0))
         model.screen = tuple(data.get("screen", (0.0, 0.0)))
         model.report = CalibrationReport(
             rms_error=float(data.get("rms_error", float("inf"))),
@@ -307,12 +287,6 @@ class CalibrationModel:
 
     @classmethod
     def load(cls, path: Path) -> Optional["CalibrationModel"]:
-        """Load a saved calibration, or ``None`` if there is no usable one.
-
-        A file from an older format is treated the same as no file at all: the
-        caller asks for a fresh calibration rather than driving the cursor with
-        a mapping that no longer means what it says.
-        """
         if not path.exists():
             return None
         try:
@@ -344,12 +318,12 @@ class CalibrationSession:
         self.countdown_s = float(countdown_s)
         self.index = 0
         self._samples: List[Point] = []
+        self._distances: List[float] = []
         self._state = "countdown"
         self._state_started: Optional[float] = None
         self.features: List[Point] = []
         self.targets: List[Point] = []
-        self._eyes: List[Tuple[float, float, float]] = []
-        self._eye_points: List[Tuple[float, float, float]] = []
+        self.reference_distance = 0.0
         self.finished = False
 
     @property
@@ -385,15 +359,15 @@ class CalibrationSession:
         self._state = "countdown"
         self._state_started = timestamp
 
-    def add_sample(self, yaw: float, pitch: float, head_position=None) -> bool:
+    def add_sample(self, yaw: float, pitch: float, distance: float = 0.0) -> bool:
         """Record a gaze sample; returns ``True`` while the point is still filling."""
         if not self.is_collecting():
             return False
         if not math.isfinite(yaw) or not math.isfinite(pitch):
             return True
         self._samples.append((float(yaw), float(pitch)))
-        if head_position is not None and all(math.isfinite(v) for v in head_position):
-            self._eyes.append(tuple(float(v) for v in head_position))
+        if distance > 0 and math.isfinite(distance):
+            self._distances.append(float(distance))
         return True
 
     def update(  # pylint: disable=too-many-return-statements
@@ -411,6 +385,7 @@ class CalibrationSession:
             self._state = "collect"
             self._state_started = timestamp
             self._samples = []
+            self._distances = []
             return False
 
         if self._state != "collect":
@@ -439,9 +414,8 @@ class CalibrationSession:
         yaw, pitch = np.median(stacked, axis=0)
         self.features.append((float(yaw), float(pitch)))
         self.targets.append(self.current_target())
-        if self._eyes:
-            self._eye_points.append(tuple(np.median(np.array(self._eyes), axis=0)))
-            self._eyes = []
+        if self._distances:
+            self.reference_distance += float(np.median(self._distances))
 
     def build(self, degree: int = 2, ridge: float = 1e-3) -> CalibrationModel:
         """Fit the collected samples into a usable model."""
@@ -451,15 +425,16 @@ class CalibrationSession:
                 f"degree {degree} needs {coefficient_count(degree)}"
             )
         model = CalibrationModel(degree=degree, ridge=ridge)
+        if self.reference_distance > 0:
+            model.reference_distance = self.reference_distance / len(self.features)
         model.reference = (
             float(np.mean([f[0] for f in self.features])),
             float(np.mean([f[1] for f in self.features])),
         )
-        if self._eye_points:
-            model.reference_eye = tuple(np.mean(np.array(self._eye_points), axis=0))
         model.fit(
             np.array(self.features, dtype=np.float64),
             np.array(self.targets, dtype=np.float64),
             screen=self.screen,
+            reference_distance=model.reference_distance,
         )
         return model

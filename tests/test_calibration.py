@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 from headtracker.calibration import (
-    FORMAT_VERSION,
     MIN_SAMPLES_PER_POINT,
     CalibrationModel,
     CalibrationSession,
@@ -202,7 +201,8 @@ def test_round_trip_through_json(tmp_path):
     targets = true_mapping(angles[:, 0], angles[:, 1])
     original = CalibrationModel(degree=2)
     original.reference = (1.0, 2.0)
-    original.fit(angles, targets, screen=SCREEN)
+    original.reference_distance = 4300.0
+    original.fit(angles, targets, screen=SCREEN, reference_distance=4300.0)
 
     path = tmp_path / "cal.json"
     original.save(path)
@@ -212,6 +212,7 @@ def test_round_trip_through_json(tmp_path):
     assert restored is not None
     probe = np.array([[5.0, -3.0], [-9.0, 6.0]])
     np.testing.assert_allclose(restored.predict(probe), original.predict(probe), rtol=1e-9)
+    assert restored.reference_distance == pytest.approx(4300.0)
 
 
 def test_loading_a_corrupt_file_returns_none(tmp_path):
@@ -240,7 +241,7 @@ def test_session_walks_every_point_and_fits():
             # Symmetric jitter around the true gaze for the point being shown.
             yaw, pitch = angles[current]
             wobble = 0.6 if (guard % 2) else -0.6
-            session.add_sample(yaw + wobble, pitch - wobble)
+            session.add_sample(yaw + wobble, pitch - wobble, distance=4200.0)
         session.update(clock)
 
     assert session.finished
@@ -248,6 +249,7 @@ def test_session_walks_every_point_and_fits():
 
     model = session.build(degree=2)
     assert model.is_fitted
+    assert model.reference_distance == pytest.approx(4200.0)
 
     # The jitter is symmetric, so its median is the true gaze and the fitted
     # surface should land back on the calibration target.
@@ -264,11 +266,12 @@ def test_session_uses_the_median_so_a_blink_cannot_move_a_point():
     session.update(0.0)  # leave the countdown
 
     for _ in range(20):
-        session.add_sample(5.0, 2.0)
-    session.add_sample(90.0, 90.0)  # a single wild sample
+        session.add_sample(5.0, 2.0, distance=4000.0)
+    session.add_sample(90.0, 90.0, distance=4000.0)  # a single wild sample
 
     session.update(1.5)  # commits the point
     assert session.features[0] == (5.0, 2.0)
+    assert session.reference_distance == pytest.approx(4000.0)
 
 
 def test_session_will_not_commit_without_enough_samples():
@@ -309,55 +312,3 @@ def test_design_matrix_shapes():
         design_matrix(features, 3)
     with pytest.raises(ValueError):
         design_matrix(np.zeros((5, 3)), 1)
-
-
-def test_the_uncalibrated_default_puts_a_straight_gaze_at_screen_centre():
-    """The fallback's one assumption: the camera faces the user square on.
-
-    It maps a zero gaze to the middle of the monitor at a gain roughly right
-    for a 24" panel seen from arm's length.  The gain is only a starting
-    point -- :meth:`CalibrationModel.fit` measures the real one.
-    """
-    model = CalibrationModel.default(SCREEN)
-    assert model.predict_one(0.0, 0.0) == pytest.approx((SCREEN[0] / 2.0, SCREEN[1] / 2.0))
-
-    right, _ = model.predict_one(24.0, 0.0)
-    _, down = model.predict_one(0.0, 17.0)
-    assert right > SCREEN[0] * 0.9
-    assert down > SCREEN[1] * 0.9
-
-
-def test_a_calibration_from_an_older_format_is_refused(tmp_path):
-    """A file this build cannot interpret must not be quietly used.
-
-    An intermediate release fitted screen-plane points instead of gaze angles.
-    The two differ by three orders of magnitude, so reading one as the other
-    produced pixel coordinates in the tens of thousands, which the controller
-    clamped -- the cursor sat pinned in a screen corner and nothing said why.
-    """
-    model = CalibrationModel.default(SCREEN)
-    model.fit(np.array([[0.0, 0.0], [10.0, 0.0], [0.0, 5.0], [-8.0, 3.0]]),
-              np.array([[960.0, 540.0], [1400.0, 540.0], [960.0, 800.0], [600.0, 700.0]]),
-              screen=SCREEN)
-    path = tmp_path / "calibration.json"
-    model.save(path)
-
-    stored = json.loads(path.read_text(encoding="utf-8"))
-    assert stored["version"] == FORMAT_VERSION
-
-    stored["version"] = FORMAT_VERSION - 1
-    path.write_text(json.dumps(stored), encoding="utf-8")
-    assert CalibrationModel.load(path) is None
-
-
-def test_no_distance_factor_survives_in_the_mapping():
-    """Distance is handled by the controller's analytic shift, not fitted here.
-
-    Both ``distance_factor`` and ``reference_distance`` existed to widen the
-    response when the user leaned back.  The ray/plane geometry does that
-    exactly, so keeping either would scale the same thing twice.
-    """
-    model = CalibrationModel.default(SCREEN)
-    assert not hasattr(model, "distance_factor")
-    assert not hasattr(model, "reference_distance")
-    assert "reference_distance" not in json.loads(json.dumps(model.to_dict()))

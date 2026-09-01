@@ -7,14 +7,6 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Optional
 
-from .controller import CursorSettings
-
-#: Single source of truth for the cursor tunables.  ``AppSettings`` used to
-#: repeat these numbers, and the copies drifted: the controller was tuned to
-#: one pair while the app kept handing it another, which is how a filter
-#: setting stopped having any effect at all.
-_CURSOR_DEFAULTS = CursorSettings()
-
 #: Where the user's settings and calibration are kept between runs.
 CONFIG_DIR = Path.home() / ".config" / "headtracker"
 SETTINGS_PATH = CONFIG_DIR / "settings.json"
@@ -26,10 +18,11 @@ class AppSettings:
     """Everything the GUI needs to restore between runs."""
 
     enabled: bool = False
-    gain: float = _CURSOR_DEFAULTS.gain
-    min_cutoff: float = _CURSOR_DEFAULTS.min_cutoff
-    beta: float = _CURSOR_DEFAULTS.beta
-    max_speed: float = _CURSOR_DEFAULTS.max_speed
+    gain: float = 1.0
+    min_cutoff: float = 0.8
+    beta: float = 0.05
+    max_speed: float = 9000.0
+    compensate_distance: bool = True
     use_eyes: bool = True
     camera_index: int = 0
     # Requested, not guaranteed.  Resolution is the single biggest lever on

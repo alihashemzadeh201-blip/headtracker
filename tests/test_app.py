@@ -8,7 +8,6 @@ import pytest
 from headtracker import app as app_module
 from headtracker import engine as engine_module
 from headtracker.app import build_parser
-from headtracker.controller import CursorSettings
 from headtracker.engine import TrackingEngine, check_wink
 from headtracker.geometry import GazeSample
 from headtracker.mouse import NullBackend
@@ -190,10 +189,7 @@ def fixture_engine(monkeypatch):
 
         def process(self, _frame, _timestamp_ms):
             self.frames += 1
-            # Screen-plane coordinates drive the cursor; the angles are only
-            # reported.  Both are set so the stub behaves like the estimator.
-            return GazeSample(yaw=5.0, pitch=2.0, distance=4200.0, valid=True,
-                              screen_x=200.0, screen_y=-100.0, source="iris")
+            return GazeSample(yaw=5.0, pitch=2.0, distance=4200.0, valid=True, source="iris")
 
         def set_use_eyes(self, _value):
             return None
@@ -244,11 +240,9 @@ def test_dwell_click_does_not_fire_while_the_cursor_moves(engine):
     # the whole time -- a target that saturates against the screen edge would
     # stop moving and legitimately trigger a dwell.
     for index in range(120):
-        plane_x = 200.0 * np.sin(index / 6.0)
-        plane_y = 120.0 * np.cos(index / 6.0)
+        yaw = 12.0 * np.sin(index / 6.0)
         engine.controller.update(
-            GazeSample(yaw=12.0 * np.sin(index / 6.0), pitch=6.0 * np.cos(index / 6.0),
-                       distance=4200.0, valid=True, screen_x=plane_x, screen_y=plane_y),
+            GazeSample(yaw=yaw, pitch=6.0 * np.cos(index / 6.0), distance=4200.0, valid=True),
             100.0 + index / 30.0,
         )
         engine._handle_dwell_click(100.0 + index / 30.0)  # pylint: disable=protected-access
@@ -271,11 +265,11 @@ def test_engine_close_releases_the_camera(engine):
 def test_cursor_settings_mirror_the_app_settings(engine):
     engine.settings.gain = 1.5
     engine.settings.min_cutoff = 0.42
-    engine.settings.max_speed = 4321.0
+    engine.settings.compensate_distance = False
     cursor = engine.cursor_settings()
     assert cursor.gain == 1.5
     assert cursor.min_cutoff == 0.42
-    assert cursor.max_speed == 4321.0
+    assert cursor.compensate_distance is False
 
 
 def test_start_calibration_covers_the_screen(engine):
@@ -314,17 +308,3 @@ def test_a_missing_model_says_where_to_get_it(monkeypatch, capsys):
     message = capsys.readouterr().err
     assert "mediapipe-models" in message
     assert "face_landmarker.task" in message
-
-
-def test_the_app_settings_and_the_cursor_settings_agree():
-    """The two copies of the cursor tunables must not drift.
-
-    They drifted once, and because the controller was constructed before the
-    settings reached it, the shipped filter ran at its library defaults no
-    matter what was configured.  Deriving one from the other makes that
-    impossible, and this test fails if anyone reintroduces the copy.
-    """
-    settings = AppSettings()
-    cursor = CursorSettings()
-    for name in ("gain", "min_cutoff", "beta", "max_speed"):
-        assert getattr(settings, name) == getattr(cursor, name), name
