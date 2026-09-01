@@ -1,4 +1,4 @@
-import cv2
+﻿import cv2
 import mediapipe as mp
 import pyautogui
 import numpy as np
@@ -300,7 +300,7 @@ class HeadTrackerApp(ctk.CTk):
                         mapped_x = np.clip(mapped_x, 0, 1)
                         mapped_y = np.clip(mapped_y, 0, 1)
 
-                        target_mouse_x = (1 - mapped_x) * screen_w
+                        target_mouse_x = mapped_x * screen_w
                         target_mouse_y = mapped_y * screen_h
                         if self.sw_inv_y.get(): target_mouse_y = screen_h - target_mouse_y
                         
