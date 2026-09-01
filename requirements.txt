@@ -1,0 +1,15 @@
+# Runtime
+numpy>=1.24
+opencv-python>=4.8
+mediapipe>=0.10
+customtkinter>=5.2
+Pillow>=10.0
+
+# Faster absolute cursor movement on Linux/X11.
+# Without it the app falls back to pyautogui, which is noticeably slower.
+python-xlib>=0.33; sys_platform == "linux"
+pyautogui>=0.9.54; sys_platform != "linux"
+
+# Development
+pytest>=7.0
+pylint>=2.17

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "headtracker"
+version = "2.0.0"
+description = "Gaze-driven mouse control: look at a point on screen and the cursor goes there"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "numpy",
+    "opencv-python>=4.8",
+    "mediapipe>=0.10",
+    "customtkinter>=5.2",
+    "Pillow",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pylint"]
+# Faster cursor control on Linux; the app falls back to pyautogui without it.
+x11 = ["python-xlib"]
+
+[project.scripts]
+headtracker = "headtracker.app:main"
+
+[tool.setuptools]
+packages = ["headtracker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.pylint.main]
+# cv2 and customtkinter are C-extension / optional packages that pylint cannot
+# introspect; both are imported defensively at runtime.
+ignored-modules = ["cv2", "customtkinter", "Xlib", "Xlib.ext", "pyautogui"]
+# A couple of constructors legitimately take a handful of tuning options.
+max-args = 6
+# The two settings dataclasses deliberately mirror each other's field names.
+min-similarity-lines = 9
+max-attributes = 20
+
+[tool.pylint."messages control"]
+# Docstrings are required for modules and classes; individual test functions
+# are named for what they assert, and restating that adds no information.
+disable = ["missing-function-docstring"]
