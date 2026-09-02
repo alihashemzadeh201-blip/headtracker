@@ -299,9 +299,30 @@ def test_grid_points_stay_inside_the_screen_and_start_centre_out():
     points = grid_points(3, 3)
     assert len(points) == 9
     for x, y in points:
-        assert 0.05 <= x <= 0.95 and 0.05 <= y <= 0.95
+        assert 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0
     first = np.array(points[0])
     assert np.linalg.norm(first - 0.5) < 0.1, "the centre point should come first"
+
+
+def test_grid_reaches_the_screen_edges():
+    """The outermost points must sit near the border, not 8% in from it.
+
+    The margin sets the domain the fitted polynomial is valid over, and a
+    degree-2 surface extrapolates badly outside it.  With the margin at 0.08
+    the screen edges were extrapolation: 35.5 px of filtered cursor error in
+    the outer band against 10.9 px in the centre, and the corners predicted
+    pixels off the display entirely.  Measured with the margin at 0.02 and a
+    5x4 grid, the outer band falls to 17.2 px and the whole screen from 23.8
+    to 13.1 px -- which is the difference between the cursor covering the
+    display and it giving up near the edges.
+    """
+    points = grid_points(5, 4)
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    assert min(xs) <= 0.03, "the left edge must be calibrated, not extrapolated"
+    assert max(xs) >= 0.97, "the right edge must be calibrated, not extrapolated"
+    assert min(ys) <= 0.03
+    assert max(ys) >= 0.97
 
 
 def test_design_matrix_shapes():

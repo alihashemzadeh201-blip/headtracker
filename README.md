@@ -62,19 +62,41 @@ pins this down over 900 frames.
 
 ### Calibration
 
-Sixteen points, about 27 seconds. The fit is degree 2 in `(yaw, pitch)`: enough
-to capture the pincushion of a webcam view, not so much that it starts fitting
-the noise in the samples. Outlier rejection drops any point where you blinked.
+Twenty points on a 5×4 grid, about 34 seconds. The fit is degree 2 in
+`(yaw, pitch)`: enough to capture the pincushion of a webcam view, not so much
+that it starts fitting the noise in the samples. Outlier rejection drops any
+point where you blinked.
 
-Measured on a simulated rig with a pinhole projection and a camera mounted
-off-axis, at 1920×1080:
+**The grid has to reach the edges of the screen.** The margin sets the domain
+the fitted polynomial is valid over, and a degree-2 surface extrapolates badly
+outside it. It used to sit at 8%, so the outermost calibration points were 8% in
+from the border and everything beyond that was extrapolation. The screen edges
+need yaw of −20.0° and +26.7°, but the fitted domain only spanned −18.6° to
++26.2° — so the corners were predicted *off the display entirely* (x = 1972 on
+a 1920 px screen, y = −16). That is what "it doesn't cover the whole screen"
+actually was.
 
-| | mean error | worst error |
+Filtered cursor error, measured at 1920×1080 with 1 px of landmark jitter,
+averaged over the frames the way the running app does:
+
+| Region | margin 8%, 4×4 | margin 2%, 5×4 |
 |---|---|---|
-| No calibration | 300 px | 559 px |
-| After calibration | **3.2 px** | **5.8 px** |
+| Centre (15–85%) | 10.9 px | 12.5 px |
+| **Whole screen** | **23.8 px** | **13.1 px** |
+| Outer edge band | 35.5 px | **17.2 px** |
 
-Calibration is not the limiting factor — the gaze measurement is.
+The centre gives up 1.6 px to gain 10.7 px across the whole screen and 18.3 px
+at the edges, which is the trade worth making: the error used to grow 3.3× as
+you moved away from the middle, and now it is close to uniform.
+
+An earlier revision of this README quoted 3.2 px after calibration. That number
+was measured only over the central 15–85% of the screen with noise-free
+landmarks — it was true of the region it covered and said nothing about the
+edges, which is exactly where the problem was.
+
+Calibration is not the limiting factor. Decomposed at 1 px of landmark jitter:
+the fit contributes 9.7 px, the total is 35.5 px, so **73% of the error is gaze
+noise**, not the mapping.
 
 ### Pose solving
 
@@ -156,6 +178,19 @@ landmark jitter:
 1080p is requested by default. Also: good light on your face, and sit close
 enough that your face fills a decent part of the frame.
 
+**Check that you actually got it.** `CAP_PROP_FRAME_WIDTH` is a request, and
+many webcams quietly hand back something smaller. Both front ends now say so:
+the headless runner prints a warning to stderr, and the preview window draws one
+over the camera image. A camera stuck at 640×480 costs tens of pixels of
+accuracy and is otherwise invisible.
+
+There is a ceiling here, and it is worth knowing before buying a better camera.
+MediaPipe's iris refinement runs on a **64×64 crop** of the eye regardless of
+what you feed it, and FaceMesh-V2 works at 256×256. So past the point where the
+eye region is larger than 64×64, extra resolution buys very little — which is
+why the table above flattens out (1.18 → 0.79 → 0.60°) rather than scaling with
+pixel count.
+
 ---
 
 ## Install and run
@@ -202,7 +237,7 @@ headtracker/
   engine.py       camera -> gaze -> cursor, no GUI
   app.py          CLI
   gui.py          customtkinter window
-tests/            161 tests, including a synthetic-face rig
+tests/            164 tests, including a synthetic-face rig
 ```
 
 The whole control path runs without a display server, so it is tested directly:
@@ -211,6 +246,6 @@ it through a pinhole camera, and hands the pixels to the real estimator. The
 accuracy numbers above come from that rig, not from hand-tuned assertions.
 
 ```bash
-pytest          # 161 tests
+pytest          # 164 tests
 pylint $(git ls-files '*.py')
 ```

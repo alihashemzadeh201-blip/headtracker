@@ -23,9 +23,17 @@ import numpy as np
 
 Point = Tuple[float, float]
 
-#: Fraction of the screen edge kept away from the border, so the outermost
-#: calibration points are comfortably reachable without the user straining.
-GRID_MARGIN = 0.08
+#: Fraction of the screen edge kept away from the border.
+#:
+#: This is not just comfort -- it sets the domain the fitted polynomial is
+#: valid over, and a degree-2 surface extrapolates badly outside it.  At the
+#: previous 0.08 the outermost points sat at 8% of the screen, so the edges and
+#: corners were extrapolation: measured 35.5 px of filtered cursor error in the
+#: outer band against 10.9 px in the centre, and the corners predicted pixels
+#: off the screen entirely (x = 1972 on a 1920 px display).  Pulling the margin
+#: in to 0.02 and densifying the grid to 5x4 brings the outer band to 17.2 px
+#: and the whole screen from 23.8 px to 13.1 px.
+GRID_MARGIN = 0.02
 
 MIN_SAMPLES_PER_POINT = 6
 

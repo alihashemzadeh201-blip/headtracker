@@ -197,7 +197,7 @@ class HeadTrackerApp(ctk.CTk):
         self.enabled = False
         self.toggle_button.configure(text="CALIBRATING...", fg_color="#616161")
         self.withdraw()
-        self.session = self.engine.start_calibration(4, 4)
+        self.session = self.engine.start_calibration(5, 4)
         self.session.start(time.monotonic())
         self.overlay = CalibrationOverlay(self, self.session, self.cancel_calibration)
         self.overlay.after(60, self.overlay.render)
@@ -287,6 +287,16 @@ class HeadTrackerApp(ctk.CTk):
             f"{self.engine.camera_resolution[0]}x{self.engine.camera_resolution[1]} cam",
             (12, height - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2,
         )
+        shortfall = self.engine.resolution_shortfall()
+        if shortfall:
+            # The camera was asked for more than it delivered, which costs real
+            # accuracy and is otherwise invisible.
+            cv2.putText(
+                frame,
+                f"camera gave {shortfall[1][0]}x{shortfall[1][1]}, "
+                f"wanted {shortfall[0][0]}x{shortfall[0][1]} - lower accuracy",
+                (12, height - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 80, 255), 2,
+            )
 
         box_width = self.preview_box.winfo_width()
         box_height = self.preview_box.winfo_height()

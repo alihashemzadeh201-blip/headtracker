@@ -25,9 +25,11 @@ class AppSettings:
     compensate_distance: bool = True
     use_eyes: bool = True
     camera_index: int = 0
-    # Requested, not guaranteed.  Resolution is the single biggest lever on
-    # accuracy: the iris is only ~11 px across at 720p, so a pixel of landmark
-    # jitter is 2.3 deg of gaze there but 1.5 deg at 1080p and 1.1 deg at 1440p.
+    # Requested, not guaranteed -- see TrackingEngine.resolution_shortfall.
+    # Resolution is the single biggest lever on accuracy: measured single-frame
+    # gaze noise at 1 px of landmark jitter is 1.18 deg at 720p, 0.79 deg at
+    # 1080p and 0.60 deg at 1440p.  The screen amplifies that by roughly 37 px
+    # per degree, so the difference between 720p and 1080p is tens of pixels.
     camera_width: int = 1920
     camera_height: int = 1080
     camera_fov_deg: float = 60.0

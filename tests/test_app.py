@@ -308,3 +308,43 @@ def test_a_missing_model_says_where_to_get_it(monkeypatch, capsys):
     message = capsys.readouterr().err
     assert "mediapipe-models" in message
     assert "face_landmarker.task" in message
+
+
+def test_no_warning_when_the_camera_delivers_what_was_asked(engine):
+    assert engine.resolution_shortfall() is None
+
+
+def test_a_camera_that_ignores_the_request_is_reported(monkeypatch):
+    """A webcam that quietly refuses 1080p must not fail silently.
+
+    Resolution is the biggest lever on accuracy -- measured single-frame gaze
+    noise at 1 px of landmark jitter is 1.18 deg at 720p against 0.79 deg at
+    1080p, amplified by roughly 37 px per degree on screen -- and CAP_PROP_*
+    is only a request.  Without this the user sees a worse cursor and nothing
+    to explain it.
+    """
+    class SmallCapture(StubCapture):
+        """A webcam that quietly hands back 640x480 instead of 1080p."""
+
+        def get(self, prop):
+            import cv2  # pylint: disable=import-outside-toplevel
+
+            return {
+                cv2.CAP_PROP_FRAME_WIDTH: 640.0,
+                cv2.CAP_PROP_FRAME_HEIGHT: 480.0,
+            }.get(prop, 0.0)
+
+        def read(self):
+            return True, np.zeros((480, 640, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(engine_module, "ensure_model", lambda: None)
+    monkeypatch.setattr(engine_module.cv2, "VideoCapture", lambda _index: SmallCapture())
+    monkeypatch.setattr(engine_module, "create_backend", lambda: NullBackend((1920, 1080)))
+    monkeypatch.setattr(engine_module, "FaceGazeTracker", type("T", (), {
+        "__init__": lambda self, *a, **k: None,
+        "process": lambda self, _f, _t: GazeSample(valid=False, reason="stub"),
+        "set_use_eyes": lambda self, _v: None,
+        "close": lambda self: None,
+    }))
+    engine = TrackingEngine(AppSettings())
+    assert engine.resolution_shortfall() == ((1920, 1080), (640, 480))

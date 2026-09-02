@@ -14,6 +14,27 @@ from .settings import CALIBRATION_PATH, SETTINGS_PATH, AppSettings
 # ---------------------------------------------------------------------------
 # Headless mode
 # ---------------------------------------------------------------------------
+def warn_resolution_shortfall(engine: TrackingEngine) -> None:
+    """Tell the user if the webcam ignored the requested resolution.
+
+    Resolution is the biggest lever on accuracy and ``CAP_PROP_*`` is only a
+    request, so a camera stuck at 640x480 costs tens of pixels with nothing on
+    screen to explain it.
+    """
+    shortfall = engine.resolution_shortfall()
+    if not shortfall:
+        return
+    want, got = shortfall
+    print(
+        f"warning: asked the camera for {want[0]}x{want[1]} but it gave "
+        f"{got[0]}x{got[1]}. Resolution is the biggest lever on accuracy -- at "
+        f"1 px of landmark jitter, gaze noise is 1.18 deg at 720p against "
+        f"0.79 deg at 1080p, and the screen amplifies that by roughly 37 px "
+        f"per degree.",
+        file=sys.stderr,
+    )
+
+
 def run_headless(settings: AppSettings, columns: int, rows: int) -> int:
     """Drive the cursor from the terminal, with no window at all."""
     model = CalibrationModel.load(CALIBRATION_PATH)
@@ -26,6 +47,7 @@ def run_headless(settings: AppSettings, columns: int, rows: int) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"camera: {engine.camera_resolution[0]}x{engine.camera_resolution[1]}")
+    warn_resolution_shortfall(engine)
     print(f"screen: {engine.mouse.screen}")
     state = "loaded" if model and model.is_fitted else "default (run with --calibrate)"
     print(f"calibration: {state}")
