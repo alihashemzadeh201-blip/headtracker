@@ -9,6 +9,13 @@ import pytest
 
 from headtracker.filters import OneEuroFilter
 from headtracker.geometry import (
+    CHIN,
+    LEFT_EYE_OUTER,
+    MOUTH_LEFT,
+    MOUTH_RIGHT,
+    NOSE_TIP,
+    REFINED_LANDMARK_COUNT,
+    RIGHT_EYE_OUTER,
     GazeEstimator,
     default_camera_matrix,
     estimate_iris_gaze,
@@ -271,3 +278,72 @@ def test_distance_grows_as_the_face_moves_away(estimator):
     far = estimator.estimate(make_face(distance_mm=900).points)
     assert far.distance > near.distance * 1.8
     assert math.isfinite(near.distance)
+
+
+# --------------------------------------------------------------------------
+# Solver robustness
+# --------------------------------------------------------------------------
+def test_noisy_frames_are_not_discarded():
+    """A real face must not be rejected for failing to match the model.
+
+    A single SOLVEPNP_ITERATIVE call produced a mirrored, negative depth on 75
+    of 300 noisy frames, and a tighter reprojection bound than the one shipped
+    rejected every frame whose landmarks sat more than ~15 px from the
+    canonical model -- which is most real faces.  Either way the symptom is a
+    cursor that stops moving.
+    """
+    camera = default_camera_matrix(WIDTH, HEIGHT, FOV)
+    base = make_face(head_yaw=0.0, eye_yaw=5.0).points
+    rng = np.random.default_rng(7)
+    rejected = 0
+    depths = []
+    for _ in range(300):
+        solved = solve_head_rotation(base + rng.normal(0.0, 1.0, base.shape), camera)
+        if solved is None:
+            rejected += 1
+        else:
+            depths.append(float(solved[1][2]))
+    assert rejected == 0
+    assert all(depth > 0.0 for depth in depths)
+
+
+def test_a_face_that_does_not_match_the_model_is_still_accepted():
+    """Landmarks far from the canonical model are a person, not an error."""
+    camera = default_camera_matrix(WIDTH, HEIGHT, FOV)
+    points = make_face(head_yaw=0.0, eye_yaw=5.0).points.copy()
+    for index in (NOSE_TIP, CHIN, MOUTH_LEFT, MOUTH_RIGHT):
+        points[index] += np.array([12.0, -9.0])
+    assert solve_head_rotation(points, camera) is not None
+
+
+def test_collapsed_landmarks_are_rejected():
+    """Coincident landmarks must be caught -- reprojection error will not.
+
+    Measured: landmarks collapsed onto one point give a reprojection error of
+    0.00 px with a depth of 1.4e16, so only the spread guard rejects them.
+    """
+    camera = default_camera_matrix(WIDTH, HEIGHT, FOV)
+    points = np.zeros((REFINED_LANDMARK_COUNT, 2), dtype=np.float64)
+    points[[NOSE_TIP, CHIN, LEFT_EYE_OUTER, RIGHT_EYE_OUTER, MOUTH_LEFT, MOUTH_RIGHT]] = 320.0
+    assert solve_head_rotation(points, camera) is None
+
+
+def test_eye_centre_uses_the_whole_rim():
+    """The eyeball centre comes from eight rim points, not the two corners.
+
+    The corners lie on one horizontal line, so their midpoint says nothing
+    about where the eye sits vertically.  Measured single-frame gaze noise at
+    12 deg of eye yaw with 1 px of landmark jitter: 1.18 deg from the rim
+    against 1.63 deg from the corners.
+    """
+    estimator = GazeEstimator(WIDTH, HEIGHT, camera_fov_deg=FOV)
+    base = make_face(head_yaw=0.0, head_pitch=0.0, eye_yaw=12.0).points
+    rng = np.random.default_rng(11)
+    yaws = []
+    for _ in range(400):
+        found = estimator.estimate(base + rng.normal(0.0, 1.0, base.shape))
+        if found is not None and found.valid:
+            yaws.append(found.yaw)
+    assert len(yaws) > 350
+    assert float(np.std(yaws)) < 1.4
+    assert abs(float(np.mean(yaws)) - 12.0) < 1.0

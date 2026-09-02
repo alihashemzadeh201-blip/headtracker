@@ -218,3 +218,44 @@ def test_apply_settings_reaches_the_filters():
     assert controller._filter_x.min_cutoff == 0.4  # pylint: disable=protected-access
     assert controller._filter_y.beta == 0.2  # pylint: disable=protected-access
     assert controller._gate.max_speed == 1234.0  # pylint: disable=protected-access
+
+
+def test_settings_supplied_at_construction_reach_the_filters():
+    """A profile passed to the constructor must not be ignored.
+
+    The filters used to be built with the library defaults and only re-tuned
+    when ``apply_settings`` was called separately, so a controller handed a
+    settings.json profile smoothed with the wrong coefficients.  That is the
+    whole of the jitter complaint: the knob existed and did nothing.
+    """
+    settings = CursorSettings(min_cutoff=0.3, beta=1.1, max_speed=4321.0)
+    mouse = AbsoluteMouse(NullBackend(SCREEN))  # type: ignore[arg-type]
+    controller = GazeCursorController(mouse, make_model(), settings)
+    assert controller._filter_x.min_cutoff == 0.3  # pylint: disable=protected-access
+    assert controller._filter_x.beta == 1.1  # pylint: disable=protected-access
+    assert controller._filter_y.min_cutoff == 0.3  # pylint: disable=protected-access
+    assert controller._filter_y.beta == 1.1  # pylint: disable=protected-access
+    assert controller._gate.max_speed == 4321.0  # pylint: disable=protected-access
+
+
+def test_a_supplied_profile_actually_smooths_more_than_a_snappy_one():
+    """The settings must change behaviour, not merely be stored.
+
+    Both profiles have to be compared at a ``beta`` that lets ``min_cutoff``
+    matter.  The filter opens as ``min_cutoff + beta * |derivative|``, and in
+    pixel space the derivative of landmark noise is large enough that a beta of
+    1.1 swamps any min_cutoff -- measured cutoff 90.6 Hz against 5.5 Hz for the
+    shipped 0.05, which is no filtering at all.
+    """
+    def jitter_of(**overrides) -> float:
+        controller, backend = make_controller(**overrides)
+        rng = np.random.default_rng(3)
+        for index in range(400):
+            noise = rng.normal(0.0, 0.4, 2)
+            controller.update(sample(10.0 + noise[0], -5.0 + noise[1]), index / 30.0)
+        moves = np.array(backend.moves[250:], dtype=float)
+        return float(np.mean(np.abs(np.diff(moves, axis=0))))
+
+    smooth = jitter_of(min_cutoff=0.3, beta=0.05)
+    twitchy = jitter_of(min_cutoff=0.8, beta=2.0)
+    assert smooth < twitchy / 1.5

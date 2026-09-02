@@ -76,6 +76,32 @@ off-axis, at 1920×1080:
 
 Calibration is not the limiting factor — the gaze measurement is.
 
+### Pose solving
+
+The head rotation comes from `cv2.solvePnP` over six landmarks. A single
+`SOLVEPNP_ITERATIVE` call is not reliable enough to run on: over 300 frames with
+1 px of landmark jitter it returned a mirrored, negative depth on 75 of them — a
+quarter of the stream, which reaches you as the cursor stuttering. The solver
+now tries SQPNP, EPNP and ITERATIVE in order and keeps the most consistent
+answer. Rejection over those same 300 frames: **0**, depth standard deviation
+29.9 units against a true 4348, no negative depths.
+
+The reprojection bound that rejects a pose outright is deliberately generous
+(60 px). It measures how well the landmarks fit a *canonical* face model, and a
+real skull is not that model: perturbing just the six pose landmarks by 15 px —
+far less than the difference between two people — already measures 13.7 px. A
+tight bound silently discards real faces, every frame, and the cursor stops
+moving. Landmarks that have collapsed onto each other are caught separately by a
+spread guard, because they reproject at 0.00 px with a depth of 1.4e16.
+
+### The eye centre
+
+The iris offset is measured against the centre of the eyeball, taken as the mean
+of eight points around the eye rim rather than the two corners. The corners lie
+on one horizontal line, so their midpoint says nothing about where the eye sits
+vertically. Single-frame gaze noise at 12° of eye yaw with 1 px of landmark
+jitter: **1.18°** from the rim against **1.63°** from the corners.
+
 ### Smoothing
 
 Raw gaze from a webcam jitters. The One Euro filter (Casiez *et al.*, CHI 2012)
@@ -88,6 +114,21 @@ chosen by measurement at 30 fps with 1 px of landmark jitter:
 
 A single frame that teleports — a landmark tracker failure — is dropped by a
 speed gate rather than flickering the cursor across the screen.
+
+`beta` is unit-dependent and worth understanding before tuning it. The filter
+opens at `min_cutoff + beta * |derivative|`, and in pixel space the derivative
+of landmark noise is large, so a `beta` of 1.1 swamps any `min_cutoff`: measured
+cut-off 90.6 Hz against 5.5 Hz for the shipped 0.05, which is no filtering at
+all. Keep `beta` small.
+
+These settings only take effect if they reach the filters. They did not: the
+filters were constructed with the library defaults and re-tuned only when
+`apply_settings` was called explicitly, so a controller handed a `settings.json`
+profile smoothed with the wrong coefficients. The constructor now routes through
+`apply_settings` as well, and
+`tests/test_controller.py::test_a_supplied_profile_actually_smooths_more_than_a_snappy_one`
+pins the behaviour rather than just the stored values — measured 9.3 px of
+resting jitter for `(0.3, 0.05)` against 19.9 px for `(0.8, 2.0)`.
 
 ---
 
@@ -108,9 +149,9 @@ landmark jitter:
 
 | Resolution | Gaze error |
 |---|---|
-| 1280×720 | 2.25° |
-| 1920×1080 | 1.52° |
-| 2560×1440 | 1.15° |
+| 1280×720 | 1.18° |
+| 1920×1080 | 0.79° |
+| 2560×1440 | 0.60° |
 
 1080p is requested by default. Also: good light on your face, and sit close
 enough that your face fills a decent part of the frame.
@@ -161,7 +202,7 @@ headtracker/
   engine.py       camera -> gaze -> cursor, no GUI
   app.py          CLI
   gui.py          customtkinter window
-tests/            155 tests, including a synthetic-face rig
+tests/            161 tests, including a synthetic-face rig
 ```
 
 The whole control path runs without a display server, so it is tested directly:
@@ -170,6 +211,6 @@ it through a pinhole camera, and hands the pixels to the real estimator. The
 accuracy numbers above come from that rig, not from hand-tuned assertions.
 
 ```bash
-pytest          # 155 tests
+pytest          # 161 tests
 pylint $(git ls-files '*.py')
 ```

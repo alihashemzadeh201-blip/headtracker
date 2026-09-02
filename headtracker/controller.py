@@ -61,13 +61,19 @@ class GazeCursorController:
         settings: Optional[CursorSettings] = None,
     ) -> None:
         self.mouse = mouse
-        self.settings = settings or CursorSettings()
         self.model = model or CalibrationModel.default(mouse.screen)
+        self.settings = CursorSettings()
         self._filter_x = OneEuroFilter()
         self._filter_y = OneEuroFilter()
         self._gate = GlitchGate()
         self._invalid_since: Optional[float] = None
         self._holding = False
+        # Route construction through apply_settings as well.  The filters used
+        # to be built with the library defaults and only re-tuned when
+        # apply_settings was called explicitly, so a controller handed a
+        # settings.json profile smoothed with the wrong coefficients until
+        # something happened to call it.  One code path, not two.
+        self.apply_settings(settings or CursorSettings())
 
     # -- configuration ------------------------------------------------------
     def set_model(self, model: CalibrationModel) -> None:
