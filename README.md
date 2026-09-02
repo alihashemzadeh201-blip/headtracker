@@ -184,12 +184,47 @@ the headless runner prints a warning to stderr, and the preview window draws one
 over the camera image. A camera stuck at 640×480 costs tens of pixels of
 accuracy and is otherwise invisible.
 
-There is a ceiling here, and it is worth knowing before buying a better camera.
-MediaPipe's iris refinement runs on a **64×64 crop** of the eye regardless of
-what you feed it, and FaceMesh-V2 works at 256×256. So past the point where the
-eye region is larger than 64×64, extra resolution buys very little — which is
-why the table above flattens out (1.18 → 0.79 → 0.60°) rather than scaling with
-pixel count.
+There is a ceiling here, and it is worth knowing before buying a better camera
+or trying to crop in on the eyes.
+
+MediaPipe's iris refinement crops **twice the eye width** and resizes that to
+**64×64**, whatever the input resolution; FaceMesh-V2 works at 256×256. So the
+question is not "how big is the eye" but "is 2× the eye width already past 64?"
+Measured on a synthetic face at a typical 600 mm:
+
+| Setup | Eye width | Crop (2×) | Against the 64×64 input |
+|---|---|---|---|
+| 1280×720 @600 mm | 36.2 px | 72.5 px | above — downsampling |
+| 1920×1080 @600 mm | 54.4 px | 108.7 px | above — downsampling |
+| 2560×1440 @600 mm | 72.5 px | 145.0 px | above — downsampling |
+| 1920×1080 @900 mm | 36.6 px | 73.3 px | above — downsampling |
+
+**Zooming in on the eyes does not help.** In every ordinary setup the crop is
+already larger than the model's 64×64 input, so MediaPipe is throwing detail
+away, not starved for it. Cropping and upscaling adds no information the model
+did not already discard. Moving closer or using a higher-resolution camera does
+add real pixels — but only up to the point where 2× eye width reaches 64, which
+even 720p clears. That is why the resolution table above flattens out
+(1.18 → 0.79 → 0.60°) instead of scaling with pixel count.
+
+### Lighting
+
+Light is the other common reason a tracker is worse than its numbers, and it is
+the one thing here that can be checked in seconds. Both front ends now measure
+each frame and say so if the light is unusable:
+
+- mean brightness below 55/255 — too dark
+- mean brightness above 205/255 — blown out
+- standard deviation below 32 — too flat, usually backlit (a face silhouetted
+  against a window). This is the sneaky one: the preview looks fine and the
+  brightness number looks fine, but the eyelid and iris boundary has no edge
+  left for the landmarks to fit against.
+
+Put the light in front of you, not behind.
+
+Note that lighting is the one factor this project's test rig **cannot** measure:
+the rig projects landmarks directly and never renders an image, so the
+thresholds above are conventional rather than fitted.
 
 ---
 
@@ -237,7 +272,7 @@ headtracker/
   engine.py       camera -> gaze -> cursor, no GUI
   app.py          CLI
   gui.py          customtkinter window
-tests/            164 tests, including a synthetic-face rig
+tests/            169 tests, including a synthetic-face rig
 ```
 
 The whole control path runs without a display server, so it is tested directly:
@@ -246,6 +281,6 @@ it through a pinhole camera, and hands the pixels to the real estimator. The
 accuracy numbers above come from that rig, not from hand-tuned assertions.
 
 ```bash
-pytest          # 164 tests
+pytest          # 169 tests
 pylint $(git ls-files '*.py')
 ```

@@ -14,6 +14,19 @@ from .settings import CALIBRATION_PATH, SETTINGS_PATH, AppSettings
 # ---------------------------------------------------------------------------
 # Headless mode
 # ---------------------------------------------------------------------------
+def warn_lighting(report) -> None:
+    """Tell the user if the light on their face is unusable.
+
+    Lighting cannot be measured on the synthetic rig -- it projects landmarks
+    directly and never renders an image -- but bad light is a common reason a
+    gaze tracker performs worse than its own numbers suggest, and it is the one
+    part of the setup the user can fix in seconds.
+    """
+    if report is None or report.problem is None:
+        return
+    print(f"warning: the light on your face is {report.problem}", file=sys.stderr)
+
+
 def warn_resolution_shortfall(engine: TrackingEngine) -> None:
     """Tell the user if the webcam ignored the requested resolution.
 
@@ -33,6 +46,30 @@ def warn_resolution_shortfall(engine: TrackingEngine) -> None:
         f"per degree.",
         file=sys.stderr,
     )
+
+
+class _LightingCheck:  # pylint: disable=too-few-public-methods
+    """Warns once about bad light, after enough frames to be sure.
+
+    A single dark frame during camera warm-up is normal, so the judgement waits
+    for a handful of frames before saying anything.  One method by design: it is
+    a counter with a side effect, not an interface.
+    """
+
+    warmup = 30
+
+    def __init__(self) -> None:
+        self.frames = 0
+        self.done = False
+
+    def observe(self, engine: TrackingEngine, frame) -> None:
+        if self.done or self.frames >= self.warmup:
+            self.done = True
+            return
+        self.frames += 1
+        if self.frames == self.warmup:
+            self.done = True
+            warn_lighting(engine.lighting(frame))
 
 
 def run_headless(settings: AppSettings, columns: int, rows: int) -> int:
@@ -61,12 +98,14 @@ def run_headless(settings: AppSettings, columns: int, rows: int) -> int:
 
         enabled = model is not None and model.is_fitted
         last_click = 0.0
+        light_check = _LightingCheck()
         while True:
             frame = engine.read_frame()
             if frame is None:
                 time.sleep(0.01)
                 continue
             now = time.monotonic()
+            light_check.observe(engine, frame)
             sample = engine.step(frame, enabled and session is None, now)
 
             if session is not None:

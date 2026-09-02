@@ -20,6 +20,49 @@ from .mouse import AbsoluteMouse, create_backend
 from .settings import CALIBRATION_PATH, AppSettings
 from .tracking import FaceGazeTracker, ensure_model
 
+#: Mean frame brightness (0-255) outside which the landmark model degrades.
+#: MediaPipe's face mesh is trained on normally exposed frames; a dark or
+#: blown-out frame loses the contrast at the eyelid and iris boundary, which is
+#: exactly the edge the iris landmarks are fitted against.
+DARK_MEAN = 55.0
+BRIGHT_MEAN = 205.0
+
+#: Standard deviation of frame brightness below which the face has too little
+#: contrast to localise the iris reliably -- typical of a backlit room, where
+#: the face is a flat silhouette against a bright window.
+LOW_CONTRAST_STD = 32.0
+
+
+class LightingReport:
+    """What a frame says about the light on the user's face."""
+
+    def __init__(self, mean: float, std: float) -> None:
+        self.mean = float(mean)
+        self.std = float(std)
+
+    @property
+    def problem(self) -> Optional[str]:
+        """A human-readable complaint, or ``None`` if the light looks usable."""
+        if self.mean < DARK_MEAN:
+            return (
+                f"too dark (mean {self.mean:.0f}/255) -- add light on your face, "
+                f"not behind it"
+            )
+        if self.mean > BRIGHT_MEAN:
+            return f"too bright (mean {self.mean:.0f}/255) -- reduce exposure or light"
+        if self.std < LOW_CONTRAST_STD:
+            return (
+                f"too flat (contrast {self.std:.0f}) -- probably backlit; put the "
+                f"light source in front of you"
+            )
+        return None
+
+    def describe(self) -> str:
+        """One line for an overlay or a log, whether or not there is a problem."""
+        detail = f"brightness {self.mean:.0f}/255, contrast {self.std:.0f}"
+        complaint = self.problem
+        return f"{detail} ({complaint})" if complaint else f"{detail} (ok)"
+
 class TrackingEngine:
     """Camera -> landmarks -> gaze -> cursor, with no GUI involved.
 
@@ -119,6 +162,20 @@ class TrackingEngine:
             return None
         ok, frame = self.capture.read()
         return frame if ok else None
+
+    @staticmethod
+    def lighting(frame: np.ndarray) -> Optional[LightingReport]:
+        """Measure the light on the face from a frame.
+
+        Lighting cannot be tested on the synthetic rig -- the rig projects
+        landmarks directly and never renders an image -- but it is cheap to
+        detect at runtime, and bad light is a common reason a gaze tracker is
+        worse than its own numbers suggest.
+        """
+        if frame is None or frame.size == 0:
+            return None
+        grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        return LightingReport(float(grey.mean()), float(grey.std()))
 
     def step(self, frame: np.ndarray, enabled: bool, now: Optional[float] = None) -> GazeSample:
         """Process one frame and move the cursor if tracking is enabled."""

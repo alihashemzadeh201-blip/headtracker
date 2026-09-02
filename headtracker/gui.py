@@ -297,6 +297,15 @@ class HeadTrackerApp(ctk.CTk):
                 f"wanted {shortfall[0][0]}x{shortfall[0][1]} - lower accuracy",
                 (12, height - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 80, 255), 2,
             )
+        light = self.engine.lighting(frame)
+        if light is not None and light.problem is not None:
+            # Bad light is the one accuracy problem the user can fix in seconds,
+            # and it is invisible in the cursor behaviour alone.
+            cv2.putText(
+                frame,
+                f"light: {light.problem}",
+                (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 80, 255), 2,
+            )
 
         box_width = self.preview_box.winfo_width()
         box_height = self.preview_box.winfo_height()

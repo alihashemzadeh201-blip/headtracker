@@ -348,3 +348,45 @@ def test_a_camera_that_ignores_the_request_is_reported(monkeypatch):
     }))
     engine = TrackingEngine(AppSettings())
     assert engine.resolution_shortfall() == ((1920, 1080), (640, 480))
+
+
+# --------------------------------------------------------------------------
+# Lighting diagnostic
+# --------------------------------------------------------------------------
+def test_well_lit_frame_has_no_complaint():
+    frame = np.full((480, 640, 3), 120, dtype=np.uint8)
+    frame[:, 320:] = 190  # give it contrast
+    report = TrackingEngine.lighting(frame)
+    assert report is not None
+    assert report.problem is None
+
+
+def test_a_dark_frame_is_reported():
+    frame = np.full((480, 640, 3), 20, dtype=np.uint8)
+    report = TrackingEngine.lighting(frame)
+    assert report.problem is not None
+    assert "too dark" in report.problem
+
+
+def test_a_blown_out_frame_is_reported():
+    frame = np.full((480, 640, 3), 240, dtype=np.uint8)
+    report = TrackingEngine.lighting(frame)
+    assert report.problem is not None
+    assert "too bright" in report.problem
+
+
+def test_a_flat_backlit_frame_is_reported():
+    """Correct mean brightness but no contrast -- a face silhouetted by a window.
+
+    This is the case that is hardest to notice: the preview looks fine, the
+    brightness number looks fine, and the iris landmarks are still unreliable
+    because the eyelid boundary has no edge to fit against.
+    """
+    frame = np.full((480, 640, 3), 128, dtype=np.uint8)
+    report = TrackingEngine.lighting(frame)
+    assert report.problem is not None
+    assert "too flat" in report.problem
+
+
+def test_lighting_returns_none_for_an_empty_frame():
+    assert TrackingEngine.lighting(np.zeros((0, 0, 3), dtype=np.uint8)) is None
