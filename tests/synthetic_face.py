@@ -110,6 +110,28 @@ def euler_to_rotation(yaw_deg: float, pitch_deg: float, roll_deg: float) -> np.n
     return r_roll @ r_pitch @ r_yaw @ base
 
 
+def _occlude_by_lids(
+    block: np.ndarray, model: Dict[int, np.ndarray], side: str, eye_open: float
+) -> np.ndarray:
+    """Clip the iris landmarks to what the eyelids actually leave visible.
+
+    A landmark detector cannot report the part of the iris that is behind a
+    lid; it reports the visible boundary instead.  Leaving this out made the rig
+    structurally incapable of showing any error that comes from looking up or
+    down far enough for a lid to cut across the iris -- which is precisely the
+    failure a user reports as "the bottom of the screen does not work".
+
+    The lid opening shrinks as ``eye_open`` falls, so a half-closed eye occludes
+    the iris sooner.
+    """
+    upper_key, lower_key = (159, 145) if side == "left" else (386, 374)
+    centre_y = 0.5 * (model[upper_key][1] + model[lower_key][1])
+    half = 0.5 * (model[upper_key][1] - model[lower_key][1]) * eye_open
+    out = block.copy()
+    out[:, 1] = np.clip(out[:, 1], centre_y - half, centre_y + half)
+    return out
+
+
 def _iris_block(centre: np.ndarray, eye_yaw_deg: float, eye_pitch_deg: float) -> np.ndarray:
     """Return the 5 landmarks of one iris for a given eye rotation."""
     yaw, pitch = np.radians(eye_yaw_deg), np.radians(eye_pitch_deg)
@@ -144,6 +166,7 @@ def make_face(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     height: int = 720,
     fov_deg: float = 60.0,
     eye_open: float = 1.0,
+    occlude_iris: bool = True,
     noise_px: float = 0.0,
     seed: int = 0,
 ) -> SyntheticFace:
@@ -161,6 +184,8 @@ def make_face(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     for offset, iris in enumerate((LEFT_IRIS, RIGHT_IRIS)):
         side = "left" if offset == 0 else "right"
         block = _iris_block(EYE_CENTRES[side], eye_yaw, eye_pitch)
+        if occlude_iris:
+            block = _occlude_by_lids(block, model, side, eye_open)
         for slot, point in enumerate(block):
             model[iris[slot]] = point
 

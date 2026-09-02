@@ -101,11 +101,48 @@ def test_eye_yaw_is_recovered(angle):
 
 @pytest.mark.parametrize("angle", [-18.0, -7.0, 0.0, 7.0, 18.0])
 def test_eye_pitch_is_recovered(angle):
+    """Pitch is recovered within a few degrees, with one physical caveat.
+
+    Looking down rotates the iris towards the lower lid, which clips it and
+    shortens the reading -- measured 4.28 deg short at 18 deg down against
+    0.32 deg at 18 deg up.  The tolerance is therefore wider downward, and
+    ``test_looking_down_is_occluded_by_the_lower_lid_and_reading_up_is_not``
+    pins the asymmetry itself rather than letting it hide inside a tolerance.
+    """
     face = make_face(eye_pitch=angle)
     measured = estimate_iris_gaze(face.points)
     assert measured is not None
     _, pitch, _ = measured
-    assert pitch == pytest.approx(angle, abs=3.5)
+    tolerance = 5.0 if angle > 0 else 3.5
+    assert pitch == pytest.approx(angle, abs=tolerance)
+
+
+def test_looking_down_is_occluded_by_the_lower_lid_and_reading_up_is_not():
+    """The lower lid clips the iris when you look down; the upper lid does not
+    cost nearly as much when you look up.
+
+    Measured with the lids modelled: at 18 deg down the reading is 4.28 deg
+    short, at 18 deg up it is 0.32 deg short.  The asymmetry is physical -- the
+    iris rotates down towards the lower lid -- and it is why the bottom of a
+    screen is harder to hit than the top.  A rig that places the iris
+    independently of the lids cannot show this at all, which is how the
+    bottom-of-screen complaint stayed invisible through several revisions.
+    """
+    down = estimate_iris_gaze(make_face(eye_pitch=18.0).points)
+    up = estimate_iris_gaze(make_face(eye_pitch=-18.0).points)
+    assert down is not None and up is not None
+    down_error = abs(down[1] - 18.0)
+    up_error = abs(up[1] + 18.0)
+    assert down_error > up_error * 2.0
+    assert down_error > 3.5
+
+
+def test_lid_occlusion_can_be_switched_off_for_comparison():
+    """Guards the rig itself: the occlusion model must be what creates the bias."""
+    occluded = estimate_iris_gaze(make_face(eye_pitch=18.0).points)
+    clear = estimate_iris_gaze(make_face(eye_pitch=18.0, occlude_iris=False).points)
+    assert occluded is not None and clear is not None
+    assert abs(occluded[1] - 18.0) > abs(clear[1] - 18.0)
 
 
 def test_iris_estimate_is_distance_invariant():

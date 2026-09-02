@@ -144,7 +144,7 @@ class TrackingEngine:
         self.controller.apply_settings(self.cursor_settings())
 
     # -- calibration --------------------------------------------------------
-    def start_calibration(self, columns: int = 5, rows: int = 4) -> CalibrationSession:
+    def start_calibration(self, columns: int = 6, rows: int = 5) -> CalibrationSession:
         return CalibrationSession(
             grid_points(columns, rows),
             screen=self.mouse.screen,

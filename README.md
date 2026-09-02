@@ -62,10 +62,24 @@ pins this down over 900 frames.
 
 ### Calibration
 
-Twenty points on a 5×4 grid, about 34 seconds. The fit is degree 2 in
+Thirty points on a 6×5 grid, about 51 seconds. The fit is degree 2 in
 `(yaw, pitch)`: enough to capture the pincushion of a webcam view, not so much
 that it starts fitting the noise in the samples. Outlier rejection drops any
 point where you blinked.
+
+**The grid density is chosen for stability, not for the best case.** Measured
+whole-screen cursor error with the eyelids modelled, over three independent
+noise seeds:
+
+| Grid | Seed A | Seed B | Seed C | Mean |
+|---|---|---|---|---|
+| 5×4 | 15.6 px | 25.3 px | 16.8 px | 19.2 px |
+| **6×5** | 15.8 px | 15.8 px | 15.9 px | **15.8 px** |
+| 7×6 | 15.2 px | 17.6 px | 14.9 px | 15.9 px |
+
+7×6 has the best single draw and 6×5 has none of the bad ones. 5×4 is the one to
+avoid: on one seed in three it lands at 25 px, so which calibration you get is a
+lottery. 6×5 costs 17 extra seconds to remove that.
 
 **The grid has to reach the edges of the screen.** The margin sets the domain
 the fitted polynomial is valid over, and a degree-2 surface extrapolates badly
@@ -123,6 +137,37 @@ of eight points around the eye rim rather than the two corners. The corners lie
 on one horizontal line, so their midpoint says nothing about where the eye sits
 vertically. Single-frame gaze noise at 12° of eye yaw with 1 px of landmark
 jitter: **1.18°** from the rim against **1.63°** from the corners.
+
+### Eyelids, and a blind spot this project had
+
+A landmark detector cannot report the part of the iris that is behind a lid — it
+reports the visible boundary instead. The synthetic rig used to place the iris
+**independently of the eyelids**, so the iris was never occluded and the rig was
+structurally incapable of showing any error that comes from looking far enough
+up or down for a lid to cut across the iris. That is a real gap, and it hid the
+vertical problem for several revisions. `make_face(..., occlude_iris=False)`
+still produces the old behaviour so the two can be compared.
+
+What the corrected rig measures is a **compression** of the vertical signal, not
+a one-sided failure. Gain of measured pitch against asked pitch:
+
+| Asked pitch | Lids off | Lids on |
+|---|---|---|
+| Up, −18° to −4° | 1.043 | 0.877 |
+| Middle, −4° to +4° | 1.000 | 1.000 |
+| Down, +4° to +18° | 1.021 | 0.840 |
+| *Yaw, −18° to +18° (control)* | 1.026 | *1.026* |
+
+Both extremes lose about 15% of their authority, and the yaw control is
+untouched — which is what confirms the lids are the cause, since nothing cuts
+the iris horizontally.
+
+It is worth recording that an earlier note here claimed the *lower* lid made
+downward gaze roughly fifteen times worse than the upper lid made upward gaze.
+That was wrong. The lid geometry is nearly symmetric (8.6 units of slack above
+the eye centre against 6.6 below), and the raw errors looked asymmetric only
+because the compression was sitting on top of the estimator's own downward
+pitch bias. Separating the two is what the gain table above does.
 
 ### Smoothing
 
@@ -272,7 +317,7 @@ headtracker/
   engine.py       camera -> gaze -> cursor, no GUI
   app.py          CLI
   gui.py          customtkinter window
-tests/            169 tests, including a synthetic-face rig
+tests/            172 tests, including a synthetic-face rig
 ```
 
 The whole control path runs without a display server, so it is tested directly:
@@ -281,6 +326,6 @@ it through a pinhole camera, and hands the pixels to the real estimator. The
 accuracy numbers above come from that rig, not from hand-tuned assertions.
 
 ```bash
-pytest          # 169 tests
+pytest          # 172 tests
 pylint $(git ls-files '*.py')
 ```

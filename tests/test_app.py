@@ -278,6 +278,20 @@ def test_start_calibration_covers_the_screen(engine):
     assert session.screen == (1920.0, 1080.0)
 
 
+def test_the_default_calibration_grid_is_6x5(engine):
+    """The shipped default is a measured choice, not a round number.
+
+    With the eyelids modelled, whole-screen cursor error over three independent
+    noise seeds: 5x4 gave 15.6 / 25.3 / 16.8 px -- one seed blows out to 25 px,
+    so the calibration a given user gets is a lottery.  6x5 gave 15.8 / 15.8 /
+    15.9, and 7x6 gave 15.2 / 17.6 / 14.9.  6x5 wins on stability, not on the
+    best case, which is the thing that actually matters: 19.2 px mean for 5x4
+    against 15.8 px, and no bad draw.
+    """
+    session = engine.start_calibration()
+    assert session.total_points == 30
+
+
 # --------------------------------------------------------------------------
 # Startup failures must be explained, not dumped as tracebacks
 # --------------------------------------------------------------------------

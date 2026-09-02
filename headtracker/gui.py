@@ -197,7 +197,7 @@ class HeadTrackerApp(ctk.CTk):
         self.enabled = False
         self.toggle_button.configure(text="CALIBRATING...", fg_color="#616161")
         self.withdraw()
-        self.session = self.engine.start_calibration(5, 4)
+        self.session = self.engine.start_calibration(6, 5)
         self.session.start(time.monotonic())
         self.overlay = CalibrationOverlay(self, self.session, self.cancel_calibration)
         self.overlay.after(60, self.overlay.render)
