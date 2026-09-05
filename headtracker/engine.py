@@ -148,7 +148,6 @@ class TrackingEngine:
         return CalibrationSession(
             grid_points(columns, rows),
             screen=self.mouse.screen,
-            dwell_s=1.1,
             countdown_s=0.6,
         )
 

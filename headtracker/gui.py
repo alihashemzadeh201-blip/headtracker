@@ -40,11 +40,17 @@ class CalibrationOverlay(  # pylint: disable=too-few-public-methods
         self.canvas.pack(fill="both", expand=True)
         self.protocol("WM_DELETE_WINDOW", self.on_done)
         self.bind("<Escape>", lambda _event: self.on_done())
-        # Any key skips the rest of the dwell on the current point, so the user
-        # is not held hostage by the timer thirty times over.  Escape is handled
-        # above and must stay a cancel, so it is filtered out here.
+        # Nothing advances on a timer.  The dot stays put until the user says
+        # so, by click or by any key -- a calibration that walks itself forward
+        # yanks the dot away from under someone still settling on it.  Escape
+        # is bound above and must stay a cancel, so it is filtered out here.
+        self.bind("<Button-1>", self._on_click)
         self.bind("<Key>", self._on_key)
         self.focus_set()
+
+    def _on_click(self, _event) -> None:
+        if self.on_advance is not None:
+            self.on_advance()
 
     def _on_key(self, event) -> None:
         if event.keysym == "Escape" or self.on_advance is None:
@@ -62,18 +68,23 @@ class CalibrationOverlay(  # pylint: disable=too-few-public-methods
             return
         x, y = point[0] * width, point[1] * height
         progress = self.session.progress() if self.session.is_collecting() else 0.0
+        ready = self.session.is_ready()
+        ring = "#3fb950" if ready else "#30363d"
 
-        self.canvas.create_oval(x - 34, y - 34, x + 34, y + 34, outline="#30363d", width=2)
+        self.canvas.create_oval(x - 34, y - 34, x + 34, y + 34, outline=ring, width=2)
         if progress > 0:
             self.canvas.create_arc(
                 x - 34, y - 34, x + 34, y + 34, start=90, extent=-360 * progress,
                 outline="#3fb950", width=4,
             )
         self.canvas.create_oval(x - 9, y - 9, x + 9, y + 9, fill="#e53935", outline="")
+        # Say plainly whether a click will do anything yet.  Without this the
+        # only feedback for clicking too early is nothing happening at all.
+        action = "click or press any key for the next point" if ready else "keep looking at the dot"
         self.canvas.create_text(
-            width / 2, 30, fill="#8b949e",
+            width / 2, 30, fill="#3fb950" if ready else "#8b949e",
             text=f"Look at the dot   {self.session.index + 1}/{self.session.total_points}"
-                 "        (any key: next point, Esc: cancel)",
+                 f"        ({action}, Esc: cancel)",
             font=("Helvetica", 16),
         )
 

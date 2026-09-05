@@ -128,7 +128,7 @@ def measure(estimator, yaw: float, pitch: float, noise_px: float = 0.0, seed: in
 def run_calibration(estimator, columns=4, rows=4, noise_px=0.0) -> CalibrationModel:
     """Drive the real CalibrationSession with measured gaze samples."""
     points = grid_points(columns, rows)
-    session = CalibrationSession(points, screen=SCREEN, dwell_s=0.5, countdown_s=0.1)
+    session = CalibrationSession(points, screen=SCREEN, countdown_s=0.1)
     clock = 0.0
     session.start(clock)
 
@@ -150,6 +150,8 @@ def run_calibration(estimator, columns=4, rows=4, noise_px=0.0) -> CalibrationMo
             if sample.valid:
                 session.add_sample(sample.yaw, sample.pitch, sample.distance)
         session.update(clock)
+        if session.is_ready():
+            session.advance(clock)  # stand in for the user's click
 
     assert session.finished, "calibration never completed"
     return session.build(degree=2)

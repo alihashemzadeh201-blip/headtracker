@@ -146,7 +146,8 @@ def run_headless(settings: AppSettings, columns: int, rows: int) -> int:
             session.start(time.monotonic())
             print(
                 f"calibrating: look at each of {session.total_points} points "
-                "(any key: next point, Ctrl-C: cancel)"
+                "(press a key for the next point -- nothing advances on its own, "
+                "Ctrl-C: cancel)"
             )
 
         enabled = model is not None and model.is_fitted

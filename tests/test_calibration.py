@@ -320,7 +320,7 @@ def test_refusing_a_stale_file_leaves_the_app_asking_for_a_recalibration(tmp_pat
 # --------------------------------------------------------------------------
 def test_session_walks_every_point_and_fits():
     points = grid_points(3, 3)
-    session = CalibrationSession(points, screen=SCREEN, dwell_s=0.5, countdown_s=0.2)
+    session = CalibrationSession(points, screen=SCREEN, countdown_s=0.2)
     angles = angles_for_points(points)
 
     clock = 0.0
@@ -336,6 +336,8 @@ def test_session_walks_every_point_and_fits():
             wobble = 0.6 if (guard % 2) else -0.6
             session.add_sample(yaw + wobble, pitch - wobble, distance=4200.0)
         session.update(clock)
+        if session.is_ready():
+            session.advance(clock)  # the user, not the timer, moves it on
 
     assert session.finished
     assert len(session.features) == len(points)
@@ -354,7 +356,7 @@ def test_session_walks_every_point_and_fits():
 
 
 def test_session_uses_the_median_so_a_blink_cannot_move_a_point():
-    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, dwell_s=1.0, countdown_s=0.0)
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, countdown_s=0.0)
     session.start(0.0)
     session.update(0.0)  # leave the countdown
 
@@ -362,28 +364,83 @@ def test_session_uses_the_median_so_a_blink_cannot_move_a_point():
         session.add_sample(5.0, 2.0, distance=4000.0)
     session.add_sample(90.0, 90.0, distance=4000.0)  # a single wild sample
 
-    session.update(1.5)  # commits the point
+    session.advance(1.5)  # commits the point
     assert session.features[0] == (5.0, 2.0)
     assert session.reference_distance == pytest.approx(4000.0)
 
 
+def test_update_never_moves_to_the_next_point_on_its_own():
+    """The whole point of the manual session: no timer may advance it.
+
+    A calibration that walks itself forward yanks the dot away from under a
+    user who is still settling on it, and the samples captured in that last
+    fraction of a second are the worst ones in the whole fit.  Ten minutes of
+    ticking with a full sample buffer must leave the point exactly where it was.
+    """
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, countdown_s=0.0)
+    session.start(0.0)
+    session.update(0.0)  # leave the countdown first, or samples are discarded
+
+    clock = 0.0
+    for _ in range(36000):  # ten minutes at 60 Hz, buffer kept full the whole way
+        clock += 1.0 / 60.0
+        session.add_sample(1.0, 1.0, distance=4000.0)
+        session.update(clock)
+
+    assert session.is_ready(), "the buffer was full; a click would have worked"
+    assert session.index == 0, "update() must never commit a point"
+    assert not session.features
+    assert not session.finished
+
+
+def test_advance_is_the_only_thing_that_moves_the_session_on():
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, countdown_s=0.0)
+    session.start(0.0)
+    session.update(0.0)  # leave the countdown, so samples are actually kept
+    for _ in range(MIN_SAMPLES_PER_POINT):
+        session.add_sample(1.0, 1.0, distance=4000.0)
+
+    session.update(600.0)
+    assert session.index == 0, "ten minutes of ticking must not move it"
+
+    session.advance(600.0)
+    assert session.index == 1, "a click must"
+
+
+def test_is_ready_reports_when_a_click_will_actually_do_something():
+    """Without this the only feedback for clicking too early is nothing."""
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, countdown_s=0.5)
+    session.start(0.0)
+    assert not session.is_ready(), "still counting down"
+
+    session.update(0.6)  # countdown over, collecting
+    assert not session.is_ready(), "no samples yet"
+
+    for _ in range(MIN_SAMPLES_PER_POINT - 1):
+        session.add_sample(1.0, 1.0, distance=4000.0)
+    assert not session.is_ready(), "one sample short"
+
+    session.add_sample(1.0, 1.0, distance=4000.0)
+    assert session.is_ready()
+
+
 def test_session_will_not_commit_without_enough_samples():
-    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, dwell_s=0.2, countdown_s=0.0)
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, countdown_s=0.0)
     session.start(0.0)
     session.update(0.0)
     session.add_sample(1.0, 1.0)
-    session.update(5.0)  # long dwell, but only one sample
+    session.update(5.0)
+    session.advance(5.0)  # a click, with only one sample behind it
     assert session.index == 0
     assert not session.features
 
 
-def test_advance_skips_the_rest_of_the_dwell():
-    """A keypress moves to the next point without waiting the timer out.
+def test_advance_commits_the_point_and_moves_on():
+    """A click commits the current point.  Nothing else does.
 
-    Thirty points at ~1.7 s each is nearly a minute of waiting for a user who is
-    already looking at the dot and steady on it.
+    The user, not a timer, decides when they have held the dot long enough.
     """
-    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, dwell_s=5.0, countdown_s=0.0)
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, countdown_s=0.0)
     session.start(0.0)
     session.update(0.0)  # leave the countdown
     for _ in range(MIN_SAMPLES_PER_POINT):
@@ -396,7 +453,7 @@ def test_advance_skips_the_rest_of_the_dwell():
 
 def test_advance_starts_collecting_when_pressed_during_the_countdown():
     """Pressing early must not throw the point away."""
-    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, dwell_s=1.0, countdown_s=5.0)
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, countdown_s=5.0)
     session.start(0.0)
     assert not session.is_collecting()
 
@@ -412,7 +469,7 @@ def test_advance_refuses_to_commit_a_thinly_sampled_point():
     placed control point, and a degree-2 surface is only six coefficients --
     one bad point out of nine moves the whole fit.
     """
-    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, dwell_s=5.0, countdown_s=0.0)
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, countdown_s=0.0)
     session.start(0.0)
     session.update(0.0)
     session.add_sample(1.0, 1.0)
@@ -424,7 +481,7 @@ def test_advance_refuses_to_commit_a_thinly_sampled_point():
 
 def test_advance_finishes_the_session_on_the_last_point():
     session = CalibrationSession(
-        [(0.5, 0.5), (0.2, 0.2), (0.8, 0.8)], screen=SCREEN, dwell_s=5.0, countdown_s=0.0
+        [(0.5, 0.5), (0.2, 0.2), (0.8, 0.8)], screen=SCREEN, countdown_s=0.0
     )
     session.start(0.0)
     for index in range(3):
@@ -439,7 +496,7 @@ def test_advance_finishes_the_session_on_the_last_point():
 
 def test_advance_is_inert_once_finished():
     session = CalibrationSession(
-        [(0.5, 0.5), (0.2, 0.2), (0.8, 0.8)], screen=SCREEN, dwell_s=0.1, countdown_s=0.0
+        [(0.5, 0.5), (0.2, 0.2), (0.8, 0.8)], screen=SCREEN, countdown_s=0.0
     )
     clock = 0.0
     session.start(clock)
@@ -448,6 +505,7 @@ def test_advance_is_inert_once_finished():
         for _ in range(MIN_SAMPLES_PER_POINT):
             session.add_sample(1.0, 1.0, distance=4000.0)
         session.update(clock)
+        session.advance(clock)
     assert session.finished
     before = session.index
     session.advance(clock + 1.0)

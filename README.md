@@ -62,26 +62,31 @@ pins this down over 900 frames.
 
 ### Calibration
 
-Thirty points on a 6×5 grid, about 51 seconds. The fit is degree 2 in
+Thirty points on a 6×5 grid. The fit is degree 2 in
 `(yaw, pitch)`: enough to capture the pincushion of a webcam view, not so much
 that it starts fitting the noise in the samples. Outlier rejection drops any
 point where you blinked.
 
-**Any key skips the rest of the dwell on the current point.** Thirty points at
-1.7 s each is nearly a minute of sitting still, most of it spent waiting out a
-timer on a dot you were steady on half a second in. Enter, space, or any other
-key commits the point and moves to the next; `Esc` still cancels. The same
-binding works in `--headless` mode, where a keypress is read from the terminal
-without blocking the frame loop.
+**Nothing advances on a timer.** The dot stays exactly where it is until you
+click or press a key. There used to be a 1.1 s dwell per point that moved the
+dot on by itself, and that is the wrong shape for a calibration: it yanks the
+dot away from under you while you are still settling on it, and the samples
+captured in that last fraction of a second — eyes mid-saccade — are the worst
+ones in the whole fit. You now set the pace, which means every point gets as
+many samples as you care to give it.
 
-The skip is deliberately not unconditional. A point is only committed once at
-least `MIN_SAMPLES_PER_POINT` frames of gaze have arrived, because a point
-averaged from one or two frames is exactly the outlier the median exists to
-reject — and with only six coefficients in a degree-2 fit, one bad control point
-out of thirty moves the whole surface. Pressing a key too early simply keeps
-collecting. Each skip also re-arms the countdown on the point it lands on, so
-holding a key down cannot machine-gun through the grid without ever looking at a
-dot.
+The ring around the dot turns green and the caption changes when a click will
+actually register. Before that it says to keep looking at the dot, because a
+point is only committed once at least `MIN_SAMPLES_PER_POINT` frames of gaze
+have arrived: a point averaged from one or two frames is exactly the outlier the
+median exists to reject, and with only six coefficients in a degree-2 fit, one
+bad control point out of thirty moves the whole surface. Clicking too early
+simply keeps collecting. Each advance also re-arms the countdown on the point it
+lands on, so holding the button down cannot machine-gun through the grid without
+ever looking at a dot.
+
+`--headless` mode has no window to click in, so it reads a keypress from the
+terminal instead, without blocking the frame loop.
 
 **The grid density is chosen for stability, not for the best case.** Measured
 whole-screen cursor error with the eyelids modelled, over three independent
@@ -314,7 +319,7 @@ to save it to.
 | **CALIBRATE** | Run the 30-point routine |
 | Wink (one eye shut) | Left click |
 | Dwell (optional) | Click after holding still |
-| Any key | Skip to the next calibration point |
+| Click, or any key | Next calibration point (nothing advances on its own) |
 | `Esc` | Cancel calibration |
 
 Settings and calibration persist in `~/.config/headtracker/`. A calibration file

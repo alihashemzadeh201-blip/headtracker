@@ -63,6 +63,11 @@ class _FakeWidget:
     def press_escape(self) -> None:
         self.bindings["<Escape>"](types.SimpleNamespace(keysym="Escape"))
 
+    def click(self) -> None:
+        """Deliver a left mouse click through the registered binding."""
+        assert "<Button-1>" in self.bindings, "the overlay never bound <Button-1>"
+        self.bindings["<Button-1>"](types.SimpleNamespace(num=1))
+
 
 class _FakeCanvas(_FakeWidget):
     """A canvas that keeps every draw call, so text can be asserted on."""
@@ -120,10 +125,10 @@ def _gui_module(monkeypatch):
         sys.modules.pop("headtracker.gui", None)
 
 
-def make_session(countdown_s: float = 0.0, dwell_s: float = 5.0) -> CalibrationSession:
+def make_session(countdown_s: float = 0.0) -> CalibrationSession:
     """A 3x3 session already past its countdown."""
     session = CalibrationSession(
-        grid_points(3, 3), screen=SCREEN, dwell_s=dwell_s, countdown_s=countdown_s
+        grid_points(3, 3), screen=SCREEN, countdown_s=countdown_s
     )
     session.start(0.0)
     session.update(0.0)
@@ -193,7 +198,73 @@ def test_the_on_screen_hint_mentions_the_key(gui_module):
     overlay.render()
 
     labels = [kw.get("text", "") for _name, _args, kw in overlay.canvas.drawn]
-    assert any("any key" in text for text in labels), labels
+    assert any("click" in text for text in labels), labels
+
+
+def test_a_click_advances_the_calibration_point(gui_module):
+    """The user's actual request: the dot moves when they click, not on a timer."""
+    clicks: list[int] = []
+    overlay = gui_module.CalibrationOverlay(
+        None, make_session(), on_done=lambda: None, on_advance=lambda: clicks.append(1)
+    )
+
+    overlay.click()
+    overlay.click()
+
+    assert clicks == [1, 1], "every click should advance"
+
+
+def test_the_overlay_survives_a_click_without_an_advance_callback(gui_module):
+    overlay = gui_module.CalibrationOverlay(None, make_session(), on_done=lambda: None)
+    overlay.click()  # would raise TypeError on a None callback
+
+
+def test_the_timer_never_advances_the_point(gui_module):
+    """Regression guard for what the user reported twice.
+
+    The overlay's render loop ticks every frame.  If anything in that path could
+    commit a point, the dot would still walk forward on its own no matter how
+    many bindings are added.  Ten minutes of ticking with a full sample buffer
+    must leave the session exactly where it was.
+    """
+    session = make_session()
+    fill_point(session)
+    # Wire the overlay the way HeadTrackerApp does, so the click really drives
+    # the session rather than hitting a no-op.
+    overlay = gui_module.CalibrationOverlay(
+        None, session, on_done=lambda: None, on_advance=lambda: session.advance(0.0)
+    )
+
+    clock = 0.0
+    for _ in range(36000):
+        clock += 1.0 / 60.0
+        session.add_sample(1.0, 1.0, distance=4000.0)
+        session.update(clock)
+        overlay.render()
+
+    assert session.is_ready(), "the buffer was full; a click should work"
+    assert session.index == 0, "the frame loop must not advance the point"
+    assert not session.finished
+
+    overlay.click()
+    assert session.index == 1, "a click must"
+
+
+def test_the_hint_says_when_a_click_will_work(gui_module):
+    """Clicking too early does nothing, so the screen has to say so."""
+    session = make_session()
+    overlay = gui_module.CalibrationOverlay(
+        None, session, on_done=lambda: None, on_advance=lambda: None
+    )
+
+    overlay.render()
+    waiting = [kw.get("text", "") for _n, _a, kw in overlay.canvas.drawn]
+    assert any("keep looking" in t for t in waiting), waiting
+
+    fill_point(session)
+    overlay.render()
+    ready = [kw.get("text", "") for _n, _a, kw in overlay.canvas.drawn]
+    assert any("click" in t for t in ready), ready
 
 
 # --------------------------------------------------------------------------
@@ -248,7 +319,7 @@ def test_advance_calibration_finishes_on_the_last_point(gui_module):
     machine-gun through the grid without ever looking at a dot.
     """
     session = CalibrationSession(
-        [(0.5, 0.5), (0.2, 0.2), (0.8, 0.8)], screen=SCREEN, dwell_s=5.0, countdown_s=0.0
+        [(0.5, 0.5), (0.2, 0.2), (0.8, 0.8)], screen=SCREEN, countdown_s=0.0
     )
     session.start(0.0)
     app = _RecordingApp(session, gui_module.HeadTrackerApp.advance_calibration)

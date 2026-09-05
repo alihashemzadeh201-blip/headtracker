@@ -341,14 +341,12 @@ class CalibrationSession:
         self,
         points: Sequence[Point],
         screen: Point,
-        dwell_s: float = 1.1,
         countdown_s: float = 0.6,
     ) -> None:
         if len(points) < 3:
             raise ValueError("at least 3 calibration points are required")
         self.points: List[Point] = [tuple(p) for p in points]  # type: ignore[misc]
         self.screen: Point = (float(screen[0]), float(screen[1]))
-        self.dwell_s = float(dwell_s)
         self.countdown_s = float(countdown_s)
         self.index = 0
         self._samples: List[Point] = []
@@ -404,43 +402,59 @@ class CalibrationSession:
             self._distances.append(float(distance))
         return True
 
-    def update(  # pylint: disable=too-many-return-statements
-        self, timestamp: float
-    ) -> bool:
-        """Advance the state machine; returns ``True`` once calibration is done."""
+    def update(self, timestamp: float) -> bool:
+        """Tick the countdown; returns ``True`` once calibration is done.
+
+        This deliberately never moves to the next point.  The only thing a
+        timer is allowed to do here is end the countdown, which is the pause
+        that lets the eyes settle on a dot that has just moved -- after that
+        the session waits for :meth:`advance` and collects samples for as long
+        as the user takes.  A calibration that walks itself forward yanks the
+        dot away from under a user who was still settling on it, and the
+        samples captured in that last fraction of a second are the worst ones
+        in the whole fit.
+
+        Returns ``True`` only for a session that has already finished, so
+        callers polling in a frame loop can stop.
+        """
         if self.finished:
             return True
         if self._state_started is None:
             self.start(timestamp)
             return False
+        if self._state == "countdown" and timestamp - self._state_started >= self.countdown_s:
+            self._begin_collecting(timestamp)
+        return False
 
-        elapsed = timestamp - self._state_started
-        if self._state == "countdown" and elapsed >= self.countdown_s:
-            self._state = "collect"
-            self._state_started = timestamp
-            self._samples = []
-            self._distances = []
-            return False
+    def _begin_collecting(self, timestamp: float) -> None:
+        """Leave the countdown and start accepting samples."""
+        self._state = "collect"
+        self._state_started = timestamp
+        self._samples = []
+        self._distances = []
 
-        if self._state != "collect":
-            return False
-        if elapsed < self.dwell_s or len(self._samples) < MIN_SAMPLES_PER_POINT:
-            return False
-        return self._commit_and_advance(timestamp)
+    def is_ready(self) -> bool:
+        """True when the current point has enough samples to be committed.
+
+        Lets the front end show the user that a click will now do something,
+        instead of leaving them pressing and wondering whether it registered.
+        """
+        return self.is_collecting() and len(self._samples) >= MIN_SAMPLES_PER_POINT
 
     def advance(self, timestamp: float) -> bool:
-        """Skip the remaining dwell on the current point and move on.
+        """Commit the current point and move on.  The only way points advance.
 
-        Lets the user drive calibration at their own pace instead of waiting the
-        timer out on every one of the thirty points.  Two guards keep a stray
-        keypress from quietly ruining the fit:
+        Called from a keypress or a mouse click -- never from a timer.  Two
+        guards keep a stray press from quietly ruining the fit:
 
-        * during the countdown there is nothing to commit yet, so the keypress
-          simply starts collecting immediately;
+        * during the countdown there is nothing to commit yet, so the press
+          simply ends the countdown early and starts collecting;
         * while collecting, the point is committed only once
           ``MIN_SAMPLES_PER_POINT`` samples exist.  A point averaged from one or
           two frames is exactly the noisy outlier the median in
-          :meth:`_commit_point` exists to suppress.
+          :meth:`_commit_point` exists to suppress.  :meth:`is_ready` reports
+          this so the front end can tell the user their click was too early
+          rather than silently ignoring it.
 
         Returns ``True`` when calibration finished.  ``False`` is ambiguous by
         necessity -- it covers both "moved on" and "too early to act" -- so
@@ -449,10 +463,7 @@ class CalibrationSession:
         if self.finished or self._state_started is None:
             return self.finished
         if self._state == "countdown":
-            self._state = "collect"
-            self._state_started = timestamp
-            self._samples = []
-            self._distances = []
+            self._begin_collecting(timestamp)
             return False
         if self._state != "collect":
             return False
