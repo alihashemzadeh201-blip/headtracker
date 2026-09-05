@@ -103,10 +103,10 @@ def test_eye_yaw_is_recovered(angle):
 def test_eye_pitch_is_recovered(angle):
     """Pitch is recovered within a few degrees, with one physical caveat.
 
-    Looking down rotates the iris towards the lower lid, which clips it and
-    shortens the reading -- measured 4.28 deg short at 18 deg down against
-    0.32 deg at 18 deg up.  The tolerance is therefore wider downward, and
-    ``test_looking_down_is_occluded_by_the_lower_lid_and_reading_up_is_not``
+    The lids compress the pitch reading -- measured 4.28 deg short at 18 deg
+    down against 0.32 deg at 18 deg up, the compression landing on a down-bias
+    the estimator already has.  The tolerance is therefore wider downward, and
+    ``test_the_lids_compress_the_pitch_reading_and_the_error_is_worse_looking_down``
     pins the asymmetry itself rather than letting it hide inside a tolerance.
     """
     face = make_face(eye_pitch=angle)
@@ -117,16 +117,22 @@ def test_eye_pitch_is_recovered(angle):
     assert pitch == pytest.approx(angle, abs=tolerance)
 
 
-def test_looking_down_is_occluded_by_the_lower_lid_and_reading_up_is_not():
-    """The lower lid clips the iris when you look down; the upper lid does not
-    cost nearly as much when you look up.
+def test_the_lids_compress_the_pitch_reading_and_the_error_is_worse_looking_down():
+    """The lids cost almost the same in both directions; the error does not.
 
-    Measured with the lids modelled: at 18 deg down the reading is 4.28 deg
-    short, at 18 deg up it is 0.32 deg short.  The asymmetry is physical -- the
-    iris rotates down towards the lower lid -- and it is why the bottom of a
-    screen is harder to hit than the top.  A rig that places the iris
-    independently of the lids cannot show this at all, which is how the
-    bottom-of-screen complaint stayed invisible through several revisions.
+    Measured with the lids modelled, the gain (d measured / d asked) is 0.857
+    looking up against 0.839 looking down -- against 1.048 and 1.023 with the
+    lids switched off.  The rig's lid band is close to symmetric about the eye
+    centre, so the effect is a near-uniform *compression* of the pitch reading,
+    not one lid clipping harder than the other.
+
+    The raw error, though, is strongly asymmetric: 4.28 deg short at 18 deg down
+    against 0.32 deg at 18 deg up.  That is the compression acting on a
+    down-bias the estimator already has, not a lower-lid mechanism.  It is worth
+    pinning down because it is why the bottom of a screen is harder to hit than
+    the top, and a rig that places the iris independently of the lids cannot
+    show it at all -- which is how the complaint stayed invisible through
+    several revisions.
     """
     down = estimate_iris_gaze(make_face(eye_pitch=18.0).points)
     up = estimate_iris_gaze(make_face(eye_pitch=-18.0).points)
@@ -135,6 +141,35 @@ def test_looking_down_is_occluded_by_the_lower_lid_and_reading_up_is_not():
     up_error = abs(up[1] + 18.0)
     assert down_error > up_error * 2.0
     assert down_error > 3.5
+
+
+def test_the_lid_cost_is_nearly_symmetric_up_and_down():
+    """Guards the correction above: the compression is not a lower-lid effect.
+
+    This is the assertion that would have caught the wrong explanation.  Gain is
+    fitted from a sweep so it does not depend on the value at a single angle.
+    """
+    asked = np.arange(-18.0, 18.1, 2.0)
+
+    def gains(occlude: bool) -> tuple:
+        measured = np.array(
+            [estimate_iris_gaze(make_face(eye_pitch=a, occlude_iris=occlude).points)[1]
+             for a in asked]
+        )
+        up, down = asked < -4.0, asked > 4.0
+        return (
+            np.polyfit(asked[up], measured[up], 1)[0],
+            np.polyfit(asked[down], measured[down], 1)[0],
+        )
+
+    gain_up, gain_down = gains(True)
+    clear_up, clear_down = gains(False)
+
+    # With the lids the reading is compressed, and compressed about equally
+    # both ways: a 0.018 gap between up and down against a 0.19 drop from clear.
+    assert abs(gain_up - gain_down) < 0.10
+    assert gain_up < clear_up - 0.10
+    assert gain_down < clear_down - 0.10
 
 
 def test_lid_occlusion_can_be_switched_off_for_comparison():

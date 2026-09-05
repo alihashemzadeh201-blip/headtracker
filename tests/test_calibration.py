@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from headtracker.calibration import (
+    FORMAT_VERSION,
     MIN_SAMPLES_PER_POINT,
     CalibrationModel,
     CalibrationSession,
@@ -220,6 +221,98 @@ def test_loading_a_corrupt_file_returns_none(tmp_path):
     path.write_text("{not json", encoding="utf-8")
     assert CalibrationModel.load(path) is None
     assert CalibrationModel.load(tmp_path / "missing.json") is None
+
+
+def _fitted_model():
+    points = grid_points(3, 3)
+    angles = angles_for_points(points)
+    model = CalibrationModel(degree=2)
+    model.fit(angles, true_mapping(angles[:, 0], angles[:, 1]), screen=SCREEN)
+    return model
+
+
+def test_a_saved_file_carries_the_format_version(tmp_path):
+    path = tmp_path / "cal.json"
+    _fitted_model().save(path)
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == FORMAT_VERSION
+
+
+@pytest.mark.parametrize("version", [1, 2, FORMAT_VERSION + 1, 99])
+def test_a_calibration_from_another_format_is_refused(tmp_path, version):
+    """Coefficients mean nothing without knowing what the features were.
+
+    Reading a file whose features meant something else does not raise -- it
+    returns a confident, wrong pixel, which the user experiences as "the
+    accuracy is low" with nothing on screen to explain it.  Refusing is the only
+    safe answer.  Version 2 is in the list deliberately: see the next test.
+    """
+    model = _fitted_model()
+    path = tmp_path / "cal.json"
+    model.save(path)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["version"] = version
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert CalibrationModel.load(path) is None, "a stale file must not be used"
+    with pytest.raises(ValueError, match="recalibrate"):
+        CalibrationModel.from_dict(data)
+
+
+def test_a_screen_plane_era_file_is_refused(tmp_path):
+    """The case that made the version number have to move off 2.
+
+    Three different feature spaces in this project's history all wrote
+    ``"version": 2``: ``(yaw, pitch)`` angles in ``c3d1a3a``, screen-plane
+    coordinates in ``733ded0``, and head-translation features in ``3135c66``.
+    So a version-2 file on disk is ambiguous, and leaving ``FORMAT_VERSION`` at
+    2 would have kept accepting all three.
+
+    This is the exact key set ``733ded0`` wrote -- no ``reference_distance`` --
+    with a correctly shaped degree-2 coefficient block.  Under a build whose
+    ``FORMAT_VERSION`` was still 2 this loaded, reported itself fitted, and
+    predicted ``(0.0, 0.0)``.
+    """
+    stale = {
+        "version": 2,
+        "degree": 2,
+        "mean": [960.0, 540.0],
+        "scale": [940.0, 520.0],
+        "coefficients": np.zeros((6, 2)).tolist(),
+        "reference": None,
+        "screen": [1920.0, 1080.0],
+        "rms_error": 14.0,
+    }
+    path = tmp_path / "cal.json"
+    path.write_text(json.dumps(stale), encoding="utf-8")
+
+    assert CalibrationModel.load(path) is None, "an ambiguous old file must not be used"
+    with pytest.raises(ValueError, match="recalibrate"):
+        CalibrationModel.from_dict(stale)
+
+
+def test_a_file_from_before_versioning_is_refused(tmp_path):
+    """No ``version`` key means an older build wrote it -- same answer."""
+    model = _fitted_model()
+    path = tmp_path / "cal.json"
+    model.save(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["version"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert CalibrationModel.load(path) is None
+
+
+def test_refusing_a_stale_file_leaves_the_app_asking_for_a_recalibration(tmp_path):
+    """The refusal must degrade to the normal "not calibrated" path."""
+    path = tmp_path / "cal.json"
+    _fitted_model().save(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["version"] = 1
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    model = CalibrationModel.load(path)
+    assert model is None or not model.is_fitted
 
 
 # --------------------------------------------------------------------------

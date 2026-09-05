@@ -317,7 +317,22 @@ to save it to.
 | Any key | Skip to the next calibration point |
 | `Esc` | Cancel calibration |
 
-Settings and calibration persist in `~/.config/headtracker/`.
+Settings and calibration persist in `~/.config/headtracker/`. A calibration file
+written by a build whose features meant something different is refused rather than
+guessed at, because reading one with the wrong maths does not raise: it returns a
+confident, wrong pixel, which looks exactly like "the accuracy is low" with
+nothing on screen to explain it. The app then reports
+`default (run with --calibrate)` instead.
+
+This needed fixing rather than just documenting. Three different feature spaces in
+this project's history all wrote `"version": 2` — `(yaw, pitch)` angles, the
+rejected screen-plane coordinates, and the rejected head-translation features — so
+the number distinguished nothing and a version-2 file on disk was ambiguous. A
+screen-plane-era file loads under the current build, reports itself fitted, and
+predicts `(0, 0)`. The format version is now 3, which invalidates every file
+written before the check existed. **Upgrade note: your first run after this change
+will ask you to recalibrate.** That costs about 51 seconds; the alternative is a
+cursor that is silently wrong.
 
 ---
 
@@ -334,7 +349,7 @@ headtracker/
   engine.py       camera -> gaze -> cursor, no GUI
   app.py          CLI
   gui.py          customtkinter window
-tests/            190 tests, including a synthetic-face rig
+tests/            199 tests, including a synthetic-face rig
 ```
 
 The whole control path runs without a display server, so it is tested directly:
@@ -343,6 +358,6 @@ it through a pinhole camera, and hands the pixels to the real estimator. The
 accuracy numbers above come from that rig, not from hand-tuned assertions.
 
 ```bash
-pytest          # 190 tests
+pytest          # 199 tests
 pylint $(git ls-files '*.py')
 ```

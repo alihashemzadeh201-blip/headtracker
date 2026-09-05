@@ -37,6 +37,24 @@ GRID_MARGIN = 0.02
 
 MIN_SAMPLES_PER_POINT = 6
 
+#: Bumped whenever the meaning of a persisted number changes.  The coefficients
+#: are meaningless without knowing what the features were, and reading them
+#: with the wrong maths does not fail loudly: it returns a confident, wrong
+#: pixel, which the user experiences as "the accuracy is low" with nothing on
+#: screen to explain it.
+#:
+#: This is 3 rather than 2 because the number was never actually maintained.
+#: Three different feature spaces all wrote ``"version": 2`` -- ``(yaw, pitch)``
+#: angles in ``c3d1a3a``, screen-plane coordinates in ``733ded0``, and
+#: head-translation features in ``3135c66`` -- so a version-2 file on disk is
+#: ambiguous and cannot be trusted whichever way it is read.  Verified, not
+#: assumed: a ``733ded0``-shaped file loads under this build, reports
+#: ``is_fitted`` True, and predicts ``(0.0, 0.0)``.  Starting from 3, every
+#: file written before the check existed is refused and the app falls back to
+#: asking for a calibration.  The cost is one 51-second recalibration; the
+#: alternative is a cursor that is silently wrong.
+FORMAT_VERSION = 3
+
 
 def grid_points(columns: int = 3, rows: int = 3, margin: float = GRID_MARGIN) -> List[Point]:
     """Return evenly spaced normalised ``(x, y)`` points in ``[margin, 1-margin]``."""
@@ -262,7 +280,7 @@ class CalibrationModel:
         if not self.is_fitted:
             return {}
         return {
-            "version": 2,
+            "version": FORMAT_VERSION,
             "degree": self.degree,
             "mean": self.mean.tolist(),
             "scale": self.scale.tolist(),
@@ -275,6 +293,14 @@ class CalibrationModel:
 
     @classmethod
     def from_dict(cls, data: dict) -> "CalibrationModel":
+        found = int(data.get("version", 1))
+        if found != FORMAT_VERSION:
+            # Not a corrupt file, just one written by a build whose features
+            # meant something else.  Refuse it rather than guess: load()
+            # turns this into "no calibration", so the user recalibrates.
+            raise ValueError(
+                f"calibration format {found} is not {FORMAT_VERSION}; recalibrate"
+            )
         model = cls(degree=int(data.get("degree", 2)))
         model.mean = np.array(data["mean"], dtype=np.float64)
         model.scale = np.array(data["scale"], dtype=np.float64)
