@@ -144,7 +144,10 @@ def run_headless(settings: AppSettings, columns: int, rows: int) -> int:
         if columns:
             session = engine.start_calibration(columns, rows)
             session.start(time.monotonic())
-            print(f"calibrating: look at each of {session.total_points} points")
+            print(
+                f"calibrating: look at each of {session.total_points} points "
+                "(any key: next point, Ctrl-C: cancel)"
+            )
 
         enabled = model is not None and model.is_fitted
         last_click = 0.0
