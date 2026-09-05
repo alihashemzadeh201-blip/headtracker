@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import sys
+import types
+
 import numpy as np
 import pytest
 
@@ -404,3 +408,96 @@ def test_a_flat_backlit_frame_is_reported():
 
 def test_lighting_returns_none_for_an_empty_frame():
     assert TrackingEngine.lighting(np.zeros((0, 0, 3), dtype=np.uint8)) is None
+
+
+# --------------------------------------------------------------------------
+# Keyboard advance in the headless runner
+# --------------------------------------------------------------------------
+class _Keys:
+    """A stand-in for msvcrt with a scripted queue of keystrokes."""
+
+    def __init__(self, pending: int) -> None:
+        self.pending = pending
+        self.read = 0
+
+    def kbhit(self) -> bool:
+        return self.pending > 0
+
+    def getwch(self) -> str:
+        self.pending -= 1
+        self.read += 1
+        return " "
+
+
+@pytest.fixture(name="fake_os")
+def _fake_os(monkeypatch):
+    def _set(name: str) -> None:
+        monkeypatch.setattr(app_module, "os", types.SimpleNamespace(name=name))
+
+    return _set
+
+
+def test_key_pressed_reads_a_pending_keystroke_on_windows(fake_os, monkeypatch):
+    fake_os("nt")
+    keys = _Keys(2)
+    monkeypatch.setitem(sys.modules, "msvcrt", keys)
+
+    assert app_module.key_pressed() is True
+    assert keys.read == 1, "the key must be consumed, or it fires again next frame"
+    assert app_module.key_pressed() is True
+    assert app_module.key_pressed() is False
+
+
+def test_key_pressed_reads_a_pending_keystroke_on_posix(fake_os, monkeypatch):
+    fake_os("posix")
+    seen = {}
+
+    def fake_select(rlist, _wlist, _xlist, timeout):
+        seen["rlist"], seen["timeout"] = rlist, timeout
+        return ([sys.stdin], [], [])
+
+    monkeypatch.setitem(sys.modules, "select", types.SimpleNamespace(select=fake_select))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello\n"))
+
+    assert app_module.key_pressed() is True
+    assert seen["timeout"] == 0.0, "select must not block the frame loop"
+
+
+def test_key_pressed_is_false_when_no_key_is_waiting(fake_os, monkeypatch):
+    fake_os("posix")
+    monkeypatch.setitem(
+        sys.modules, "select", types.SimpleNamespace(select=lambda *a: ([], [], []))
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    assert app_module.key_pressed() is False
+
+
+def test_key_pressed_is_false_when_there_is_no_standard_input(fake_os, monkeypatch):
+    """A service started with no stdin has ``sys.stdin is None``.
+
+    ``select.select([None], ...)`` raises TypeError, which the handler does not
+    catch -- without the guard this takes the whole frame loop down.
+    """
+    fake_os("posix")
+
+    def explode(*args):
+        raise AssertionError("select must not be called without a stdin")
+
+    monkeypatch.setitem(sys.modules, "select", types.SimpleNamespace(select=explode))
+    monkeypatch.setattr(sys, "stdin", None)
+
+    assert app_module.key_pressed() is False
+
+
+def test_key_pressed_swallows_a_terminal_that_disappears(fake_os, monkeypatch):
+    """A pty closed underneath us must not kill the cursor."""
+    fake_os("posix")
+
+    def broken(*args):
+        raise OSError("Input/output error")
+
+    monkeypatch.setitem(sys.modules, "select", types.SimpleNamespace(select=broken))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    assert app_module.key_pressed() is False

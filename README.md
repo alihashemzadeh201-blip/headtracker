@@ -67,6 +67,22 @@ Thirty points on a 6×5 grid, about 51 seconds. The fit is degree 2 in
 that it starts fitting the noise in the samples. Outlier rejection drops any
 point where you blinked.
 
+**Any key skips the rest of the dwell on the current point.** Thirty points at
+1.7 s each is nearly a minute of sitting still, most of it spent waiting out a
+timer on a dot you were steady on half a second in. Enter, space, or any other
+key commits the point and moves to the next; `Esc` still cancels. The same
+binding works in `--headless` mode, where a keypress is read from the terminal
+without blocking the frame loop.
+
+The skip is deliberately not unconditional. A point is only committed once at
+least `MIN_SAMPLES_PER_POINT` frames of gaze have arrived, because a point
+averaged from one or two frames is exactly the outlier the median exists to
+reject — and with only six coefficients in a degree-2 fit, one bad control point
+out of thirty moves the whole surface. Pressing a key too early simply keeps
+collecting. Each skip also re-arms the countdown on the point it lands on, so
+holding a key down cannot machine-gun through the grid without ever looking at a
+dot.
+
 **The grid density is chosen for stability, not for the best case.** Measured
 whole-screen cursor error with the eyelids modelled, over three independent
 noise seeds:
@@ -295,9 +311,10 @@ to save it to.
 | Action | Effect |
 |---|---|
 | `E` | Enable / disable the cursor |
-| **CALIBRATE** | Run the 16-point routine |
+| **CALIBRATE** | Run the 30-point routine |
 | Wink (one eye shut) | Left click |
 | Dwell (optional) | Click after holding still |
+| Any key | Skip to the next calibration point |
 | `Esc` | Cancel calibration |
 
 Settings and calibration persist in `~/.config/headtracker/`.
@@ -317,7 +334,7 @@ headtracker/
   engine.py       camera -> gaze -> cursor, no GUI
   app.py          CLI
   gui.py          customtkinter window
-tests/            172 tests, including a synthetic-face rig
+tests/            190 tests, including a synthetic-face rig
 ```
 
 The whole control path runs without a display server, so it is tested directly:
@@ -326,6 +343,6 @@ it through a pinhole camera, and hands the pixels to the real estimator. The
 accuracy numbers above come from that rig, not from hand-tuned assertions.
 
 ```bash
-pytest          # 172 tests
+pytest          # 190 tests
 pylint $(git ls-files '*.py')
 ```

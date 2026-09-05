@@ -27,10 +27,11 @@ class CalibrationOverlay(  # pylint: disable=too-few-public-methods
 ):
     """Full-screen dot the user looks at while samples are collected."""
 
-    def __init__(self, master, session, on_done) -> None:
+    def __init__(self, master, session, on_done, on_advance=None) -> None:
         super().__init__(master)
         self.session = session
         self.on_done = on_done
+        self.on_advance = on_advance
         self.attributes("-fullscreen", True)
         self.attributes("-topmost", True)
         self.configure(fg_color="black")
@@ -39,6 +40,16 @@ class CalibrationOverlay(  # pylint: disable=too-few-public-methods
         self.canvas.pack(fill="both", expand=True)
         self.protocol("WM_DELETE_WINDOW", self.on_done)
         self.bind("<Escape>", lambda _event: self.on_done())
+        # Any key skips the rest of the dwell on the current point, so the user
+        # is not held hostage by the timer thirty times over.  Escape is handled
+        # above and must stay a cancel, so it is filtered out here.
+        self.bind("<Key>", self._on_key)
+        self.focus_set()
+
+    def _on_key(self, event) -> None:
+        if event.keysym == "Escape" or self.on_advance is None:
+            return
+        self.on_advance()
 
     def render(self, cancelled: bool = False) -> None:
         self.canvas.delete("all")
@@ -62,7 +73,7 @@ class CalibrationOverlay(  # pylint: disable=too-few-public-methods
         self.canvas.create_text(
             width / 2, 30, fill="#8b949e",
             text=f"Look at the dot   {self.session.index + 1}/{self.session.total_points}"
-                 "        (Esc to cancel)",
+                 "        (any key: next point, Esc: cancel)",
             font=("Helvetica", 16),
         )
 
@@ -199,8 +210,19 @@ class HeadTrackerApp(ctk.CTk):
         self.withdraw()
         self.session = self.engine.start_calibration(6, 5)
         self.session.start(time.monotonic())
-        self.overlay = CalibrationOverlay(self, self.session, self.cancel_calibration)
+        self.overlay = CalibrationOverlay(
+            self, self.session, self.cancel_calibration, self.advance_calibration
+        )
         self.overlay.after(60, self.overlay.render)
+
+    def advance_calibration(self) -> None:
+        """Skip the rest of the dwell on the current calibration point."""
+        if self.session is None:
+            return
+        if self.session.advance(time.monotonic()):
+            self._finish_calibration()
+        elif self.overlay is not None:
+            self.overlay.render()
 
     def cancel_calibration(self) -> None:
         if self.overlay is not None:

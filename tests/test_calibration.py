@@ -284,6 +284,83 @@ def test_session_will_not_commit_without_enough_samples():
     assert not session.features
 
 
+def test_advance_skips_the_rest_of_the_dwell():
+    """A keypress moves to the next point without waiting the timer out.
+
+    Thirty points at ~1.7 s each is nearly a minute of waiting for a user who is
+    already looking at the dot and steady on it.
+    """
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, dwell_s=5.0, countdown_s=0.0)
+    session.start(0.0)
+    session.update(0.0)  # leave the countdown
+    for _ in range(MIN_SAMPLES_PER_POINT):
+        session.add_sample(3.0, 4.0, distance=4000.0)
+
+    assert session.advance(0.1) is False  # moved on, calibration not finished
+    assert session.index == 1
+    assert session.features[0] == (3.0, 4.0)
+
+
+def test_advance_starts_collecting_when_pressed_during_the_countdown():
+    """Pressing early must not throw the point away."""
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, dwell_s=1.0, countdown_s=5.0)
+    session.start(0.0)
+    assert not session.is_collecting()
+
+    session.advance(0.1)
+    assert session.is_collecting()
+    assert session.index == 0
+
+
+def test_advance_refuses_to_commit_a_thinly_sampled_point():
+    """A point averaged from one frame is the outlier the median exists to drop.
+
+    Letting a keypress commit it would trade a second of waiting for a badly
+    placed control point, and a degree-2 surface is only six coefficients --
+    one bad point out of nine moves the whole fit.
+    """
+    session = CalibrationSession(grid_points(3, 3), screen=SCREEN, dwell_s=5.0, countdown_s=0.0)
+    session.start(0.0)
+    session.update(0.0)
+    session.add_sample(1.0, 1.0)
+
+    session.advance(0.1)
+    assert session.index == 0
+    assert not session.features
+
+
+def test_advance_finishes_the_session_on_the_last_point():
+    session = CalibrationSession(
+        [(0.5, 0.5), (0.2, 0.2), (0.8, 0.8)], screen=SCREEN, dwell_s=5.0, countdown_s=0.0
+    )
+    session.start(0.0)
+    for index in range(3):
+        session.update(index * 10.0)  # leave each countdown
+        for _ in range(MIN_SAMPLES_PER_POINT):
+            session.add_sample(float(index), float(index), distance=4000.0)
+        done = session.advance(index * 10.0 + 0.1)
+        assert done is (index == 2)
+    assert session.finished
+    assert len(session.features) == 3
+
+
+def test_advance_is_inert_once_finished():
+    session = CalibrationSession(
+        [(0.5, 0.5), (0.2, 0.2), (0.8, 0.8)], screen=SCREEN, dwell_s=0.1, countdown_s=0.0
+    )
+    clock = 0.0
+    session.start(clock)
+    while not session.finished and clock < 50.0:
+        clock += 0.2
+        for _ in range(MIN_SAMPLES_PER_POINT):
+            session.add_sample(1.0, 1.0, distance=4000.0)
+        session.update(clock)
+    assert session.finished
+    before = session.index
+    session.advance(clock + 1.0)
+    assert session.index == before
+
+
 def test_session_rejects_a_too_short_point_list():
     with pytest.raises(ValueError, match="at least 3"):
         CalibrationSession([(0.5, 0.5)], screen=SCREEN)

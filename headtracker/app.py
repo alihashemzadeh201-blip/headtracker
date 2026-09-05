@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from typing import Optional
@@ -14,6 +15,37 @@ from .settings import CALIBRATION_PATH, SETTINGS_PATH, AppSettings
 # ---------------------------------------------------------------------------
 # Headless mode
 # ---------------------------------------------------------------------------
+def key_pressed() -> bool:
+    """True if a key is waiting on stdin, without blocking the frame loop.
+
+    Lets the headless runner advance a calibration point on a keypress the same
+    way the overlay does.  Windows and POSIX need different mechanisms, and on
+    anything else this quietly reports no key rather than breaking the loop.
+    """
+    try:
+        if os.name == "nt":
+            import msvcrt  # pylint: disable=import-outside-toplevel
+
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+                return True
+            return False
+        import select  # pylint: disable=import-outside-toplevel
+
+        # ``sys.stdin`` is None when the process was started with no standard
+        # input at all -- a service, or a GUI launcher.  select.select raises
+        # TypeError on it, which nothing below catches, so check first.
+        if sys.stdin is None:
+            return False
+        ready, _, _ = select.select([sys.stdin], [], [], 0.0)
+        if not ready:
+            return False
+        sys.stdin.readline()
+        return True
+    except (OSError, ValueError, ImportError):
+        return False
+
+
 def warn_lighting(report) -> None:
     """Tell the user if the light on their face is unusable.
 
@@ -72,6 +104,24 @@ class _LightingCheck:  # pylint: disable=too-few-public-methods
             warn_lighting(engine.lighting(frame))
 
 
+def _calibration_step(session, engine, settings, sample, now) -> Optional[bool]:
+    """Feed one frame to the calibration session.
+
+    Returns ``True`` when calibration just completed, ``None`` while it is still
+    running.  Split out of the frame loop so the loop stays readable; a keypress
+    here does the same job the overlay's key binding does in the GUI.
+    """
+    if sample.valid:
+        session.add_sample(sample.yaw, sample.pitch, sample.distance)
+    if key_pressed():
+        session.advance(now)
+    if not session.update(now):
+        return None
+    engine.install_calibration(session.build(settings.calibration_degree))
+    print(f"calibrated: {engine.controller.model.report.describe()}")
+    return True
+
+
 def run_headless(settings: AppSettings, columns: int, rows: int) -> int:
     """Drive the cursor from the terminal, with no window at all."""
     model = CalibrationModel.load(CALIBRATION_PATH)
@@ -109,11 +159,7 @@ def run_headless(settings: AppSettings, columns: int, rows: int) -> int:
             sample = engine.step(frame, enabled and session is None, now)
 
             if session is not None:
-                if sample.valid:
-                    session.add_sample(sample.yaw, sample.pitch, sample.distance)
-                if session.update(now):
-                    engine.install_calibration(session.build(settings.calibration_degree))
-                    print(f"calibrated: {engine.controller.model.report.describe()}")
+                if _calibration_step(session, engine, settings, sample, now):
                     session = None
                     enabled = True
                 elif session.index:

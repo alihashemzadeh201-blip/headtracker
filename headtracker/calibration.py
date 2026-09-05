@@ -400,7 +400,42 @@ class CalibrationSession:
             return False
         if elapsed < self.dwell_s or len(self._samples) < MIN_SAMPLES_PER_POINT:
             return False
+        return self._commit_and_advance(timestamp)
 
+    def advance(self, timestamp: float) -> bool:
+        """Skip the remaining dwell on the current point and move on.
+
+        Lets the user drive calibration at their own pace instead of waiting the
+        timer out on every one of the thirty points.  Two guards keep a stray
+        keypress from quietly ruining the fit:
+
+        * during the countdown there is nothing to commit yet, so the keypress
+          simply starts collecting immediately;
+        * while collecting, the point is committed only once
+          ``MIN_SAMPLES_PER_POINT`` samples exist.  A point averaged from one or
+          two frames is exactly the noisy outlier the median in
+          :meth:`_commit_point` exists to suppress.
+
+        Returns ``True`` when calibration finished.  ``False`` is ambiguous by
+        necessity -- it covers both "moved on" and "too early to act" -- so
+        callers that need to tell them apart should read :attr:`index`.
+        """
+        if self.finished or self._state_started is None:
+            return self.finished
+        if self._state == "countdown":
+            self._state = "collect"
+            self._state_started = timestamp
+            self._samples = []
+            self._distances = []
+            return False
+        if self._state != "collect":
+            return False
+        if len(self._samples) < MIN_SAMPLES_PER_POINT:
+            return False
+        return self._commit_and_advance(timestamp)
+
+    def _commit_and_advance(self, timestamp: float) -> bool:
+        """Store the current point and step to the next, or finish."""
         self._commit_point()
         self.index += 1
         if self.index >= len(self.points):
